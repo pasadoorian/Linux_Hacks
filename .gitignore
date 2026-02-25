@@ -1,0 +1,7 @@
+# Editor files
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
