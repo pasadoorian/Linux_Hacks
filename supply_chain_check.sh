@@ -11,21 +11,30 @@
 
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-DIM='\033[2m'
-NC='\033[0m' # No Color
+# Colors for output. Use ANSI-C $'...' quoting so the variables hold real ESC
+# bytes — that way `cat <<EOF` (used in usage()) renders colors correctly too.
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+NC=$'\033[0m' # No Color
 
 # Script configuration
 VERBOSE=false
 QUIET=false
 RUN_ALL=false
 SELECTED_CHECKS=()
+
+# Remote-execution state (populated by the `remote` subcommand).
+REMOTE_MODE=false
+REMOTE_HOST=""
+REMOTE_SUDO=false
+
+# Cache for UEFI variable dumps (efi-readvar/mokutil), keyed by store name.
+declare -A _EFI_VAR_CACHE=()
 
 # Available check categories
 declare -A CHECK_CATEGORIES=(
@@ -72,6 +81,18 @@ ${BOLD}Examples:${NC}
     $(basename "$0") secureboot bios    # Run specific checks
     $(basename "$0") -v packages        # Verbose package check
     $(basename "$0") --list             # Show available checks
+
+${BOLD}Remote Execution (over SSH):${NC}
+    remote <host> <check|all>           Run checks against a remote host
+    --sudo                              Use sudo on the remote host
+
+    Host may be 'hostname', 'user@host', or any alias from ~/.ssh/config.
+    Global flags (-v, -q) are forwarded to the remote run.
+
+${BOLD}Remote Examples:${NC}
+    $(basename "$0") remote server1 all
+    $(basename "$0") remote --sudo admin@server2 secureboot bios
+    $(basename "$0") -v remote --sudo server3 firmware
 
 ${BOLD}Note:${NC} Many checks require root privileges. Run with sudo for full results.
 EOF
@@ -160,6 +181,45 @@ run_cmd() {
     echo "$output"
 }
 
+# Read a UEFI signature store (KEK, db, dbx) using the best available tool.
+# Result is cached per-store. Empty string means no tool available or read failed.
+_get_efi_var() {
+    local store="$1"
+    if [[ -n "${_EFI_VAR_CACHE[$store]+set}" ]]; then
+        echo "${_EFI_VAR_CACHE[$store]}"
+        return
+    fi
+
+    local out=""
+    if check_command efi-readvar; then
+        out=$(efi-readvar -v "$store" 2>&1) || true
+    elif check_command mokutil; then
+        case "$store" in
+            KEK) out=$(mokutil --kek 2>&1) || true ;;
+            db)  out=$(mokutil --db  2>&1) || true ;;
+            dbx) out=$(mokutil --dbx 2>&1) || true ;;
+        esac
+    fi
+    _EFI_VAR_CACHE[$store]="$out"
+    echo "$out"
+}
+
+# Returns 0 if `pattern` appears anywhere in the named UEFI store dump.
+_cert_present() {
+    local store="$1" pattern="$2"
+    local data
+    data=$(_get_efi_var "$store")
+    [[ -n "$data" ]] && echo "$data" | grep -qF "$pattern"
+}
+
+# Whole days from now until `target` (YYYY-MM-DD). Negative when past.
+_days_until() {
+    local target_ts now_ts
+    target_ts=$(date -d "$1" +%s 2>/dev/null) || { echo "?"; return; }
+    now_ts=$(date +%s)
+    echo $(( (target_ts - now_ts) / 86400 ))
+}
+
 # ============================================================================
 # CHECK: Secure Boot
 # ============================================================================
@@ -196,6 +256,100 @@ check_secureboot() {
         fi
     else
         print_status "bootctl" "Not installed (systemd-boot)" "info"
+    fi
+
+    _check_secureboot_cert_expiry
+}
+
+# Print one cert row. `expiry_days` empty = this is a 2023 (replacement) cert,
+# so "not present" is bad. Non-empty = this is a 2011 cert, so presence is bad.
+_report_cert_row() {
+    local label="$1" present="$2" expiry_days="$3"
+    if (( present )); then
+        if [[ -n "$expiry_days" ]]; then
+            if (( expiry_days > 0 )); then
+                print_status "$label" "Present (expires in $expiry_days days)" "warn"
+            else
+                print_status "$label" "Present (EXPIRED $(( -expiry_days )) days ago)" "error"
+            fi
+        else
+            print_status "$label" "Present" "ok"
+        fi
+    else
+        if [[ -n "$expiry_days" ]]; then
+            print_status "$label" "Not present" "ok"
+        else
+            print_status "$label" "Not present" "warn"
+        fi
+    fi
+}
+
+# Check whether the Microsoft 2011 Secure Boot CAs (expiring 2026-06-27 and
+# 2026-10) are still in KEK/db and whether the 2023 replacements have arrived.
+# Background: https://eclypsium.com/blog/microsoft-secure-boot-certificates-expire-2026/
+_check_secureboot_cert_expiry() {
+    print_section "Certificate Expiration (2026)"
+
+    if ! check_command efi-readvar && ! check_command mokutil; then
+        print_status "Skipped" "Install 'efitools' (efi-readvar) or 'mokutil' to enable" "warn"
+        return
+    fi
+
+    local kek_data db_data
+    kek_data=$(_get_efi_var KEK)
+    db_data=$(_get_efi_var db)
+
+    if [[ -z "$kek_data" && -z "$db_data" ]]; then
+        # efi-readvar can usually read these without root, but on some systems
+        # the efivars filesystem is locked down.
+        print_status "Skipped" "Could not read UEFI variables (try as root)" "warn"
+        return
+    fi
+
+    local kek_days pca_days
+    kek_days=$(_days_until 2026-06-27)
+    pca_days=$(_days_until 2026-10-01)
+
+    local kek11=0 kek23=0 uefi11=0 uefi23=0 oprom23=0 win11=0 win23=0
+    _cert_present KEK "Microsoft Corporation KEK CA 2011"     && kek11=1
+    _cert_present KEK "Microsoft Corporation KEK CA 2023"     && kek23=1
+    _cert_present db  "Microsoft Corporation UEFI CA 2011"    && uefi11=1
+    _cert_present db  "Microsoft UEFI CA 2023"                && uefi23=1
+    _cert_present db  "Microsoft Option ROM UEFI CA 2023"     && oprom23=1
+    _cert_present db  "Microsoft Windows Production PCA 2011" && win11=1
+    _cert_present db  "Windows UEFI CA 2023"                  && win23=1
+
+    _report_cert_row "KEK CA 2011 (KEK)"              "$kek11"   "$kek_days"
+    _report_cert_row "KEK CA 2023 (KEK)"              "$kek23"   ""
+    _report_cert_row "UEFI CA 2011 (db)"              "$uefi11"  "$kek_days"
+    _report_cert_row "UEFI CA 2023 (db)"              "$uefi23"  ""
+    _report_cert_row "Option ROM UEFI CA 2023 (db)"   "$oprom23" ""
+    _report_cert_row "Windows PCA 2011 (db)"          "$win11"   "$pca_days"
+    _report_cert_row "Windows UEFI CA 2023 (db)"      "$win23"   ""
+
+    echo ""
+    local migrated_uefi=$(( uefi23 | oprom23 ))
+    if (( kek23 && migrated_uefi && win23 )); then
+        print_status "Migration Status" "Migrated to 2023 certificates" "ok"
+    elif (( kek23 || migrated_uefi || win23 )); then
+        print_status "Migration Status" "Partial migration (see details above)" "warn"
+        echo -e "    ${DIM}Ref: https://eclypsium.com/blog/microsoft-secure-boot-certificates-expire-2026/${NC}"
+    elif (( kek11 || uefi11 || win11 )); then
+        print_status "Migration Status" "NOT MIGRATED (still on 2011 certificates)" "error"
+        echo -e "    ${DIM}Ref: https://eclypsium.com/blog/microsoft-secure-boot-certificates-expire-2026/${NC}"
+    else
+        print_status "Migration Status" "No Microsoft Secure Boot certificates detected" "info"
+    fi
+
+    if [[ "$VERBOSE" == true ]]; then
+        if [[ -n "$kek_data" ]]; then
+            print_section "Full KEK contents"
+            print_result "$kek_data"
+        fi
+        if [[ -n "$db_data" ]]; then
+            print_section "Full db contents"
+            print_result "$db_data"
+        fi
     fi
 }
 
@@ -721,6 +875,62 @@ check_storage() {
 }
 
 # ============================================================================
+# REMOTE EXECUTION (over SSH)
+# ============================================================================
+run_remote() {
+    if [[ -z "$REMOTE_HOST" ]]; then
+        echo "Error: 'remote' requires a host argument" >&2
+        exit 1
+    fi
+    if [[ ${#SELECTED_CHECKS[@]} -eq 0 && "$RUN_ALL" != true ]]; then
+        echo "Error: 'remote $REMOTE_HOST' requires a check name or 'all'" >&2
+        exit 1
+    fi
+
+    local script_src
+    script_src=$(readlink -f "$0" 2>/dev/null || true)
+    if [[ -z "$script_src" || ! -r "$script_src" ]]; then
+        echo "Error: cannot resolve script source from \$0=$0" >&2
+        exit 1
+    fi
+
+    # Build the argv to forward to the remote invocation.
+    local fwd=()
+    [[ "$VERBOSE" == true ]] && fwd+=("-v")
+    [[ "$QUIET"   == true ]] && fwd+=("-q")
+    if [[ "$RUN_ALL" == true ]]; then
+        fwd+=("--all")
+    else
+        fwd+=("${SELECTED_CHECKS[@]}")
+    fi
+
+    local remote_path="/tmp/supply_chain_check.$$.sh"
+    local sudo_label="off"
+    local sudo_prefix=""
+    if [[ "$REMOTE_SUDO" == true ]]; then
+        sudo_label="on"
+        sudo_prefix="sudo "
+    fi
+
+    echo -e "${BOLD}${BLUE}Remote target:${NC} ${REMOTE_HOST}  ${DIM}(sudo=${sudo_label})${NC}"
+    echo -e "${DIM}Uploading script to ${REMOTE_HOST}:${remote_path}...${NC}"
+
+    if ! scp -q "$script_src" "${REMOTE_HOST}:${remote_path}"; then
+        echo "Error: scp to ${REMOTE_HOST} failed" >&2
+        exit 1
+    fi
+
+    # %q-quote each forwarded arg so the remote shell re-parses them safely.
+    local remote_args
+    remote_args=$(printf '%q ' "${fwd[@]}")
+
+    # -t allocates a TTY (needed for interactive sudo prompt and ANSI colors).
+    # Cleanup runs whether the script succeeded or failed; we preserve its rc.
+    ssh -t "$REMOTE_HOST" \
+        "${sudo_prefix}bash ${remote_path} ${remote_args}; rc=\$?; rm -f ${remote_path}; exit \$rc"
+}
+
+# ============================================================================
 # RUN ALL CHECKS
 # ============================================================================
 run_all_checks() {
@@ -745,6 +955,7 @@ run_all_checks() {
 # ============================================================================
 
 # Parse arguments
+EXPECTING_HOST=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -a|--all)
@@ -767,14 +978,27 @@ while [[ $# -gt 0 ]]; do
             usage
             exit 0
             ;;
+        remote)
+            REMOTE_MODE=true
+            EXPECTING_HOST=true
+            shift
+            ;;
+        --sudo)
+            REMOTE_SUDO=true
+            shift
+            ;;
         -*)
             echo "Unknown option: $1" >&2
             usage >&2
             exit 1
             ;;
         *)
-            # Assume it's a check category
-            if [[ -n "${CHECK_CATEGORIES[$1]}" ]]; then
+            if [[ "$EXPECTING_HOST" == true ]]; then
+                REMOTE_HOST="$1"
+                EXPECTING_HOST=false
+            elif [[ "$1" == "all" ]]; then
+                RUN_ALL=true
+            elif [[ -n "${CHECK_CATEGORIES[$1]}" ]]; then
                 SELECTED_CHECKS+=("$1")
             else
                 echo "Unknown check category: $1" >&2
@@ -786,11 +1010,39 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Print banner
+if [[ "$REMOTE_SUDO" == true && "$REMOTE_MODE" != true ]]; then
+    echo "Error: --sudo only applies with the 'remote' subcommand" >&2
+    exit 1
+fi
+if [[ "$REMOTE_MODE" == true && "$EXPECTING_HOST" == true ]]; then
+    echo "Error: 'remote' requires a host argument" >&2
+    exit 1
+fi
+
+# Remote mode skips local banner/root notice — the remote run prints its own.
+if [[ "$REMOTE_MODE" == true ]]; then
+    run_remote
+    exit $?
+fi
+
+# Print banner. In remote mode this prints from the uploaded script on the
+# remote host, so the Host/OS/Kernel reflect the target system being scanned.
+_banner_hostname=$(uname -n 2>/dev/null || echo "unknown")
+_banner_kernel=$(uname -r 2>/dev/null || echo "unknown")
+if [[ -r /etc/os-release ]]; then
+    _banner_os=$(. /etc/os-release && echo "${PRETTY_NAME:-${NAME:-unknown}}")
+else
+    _banner_os="$(uname -s 2>/dev/null) $(uname -r 2>/dev/null)"
+fi
+
 echo -e "${BOLD}${BLUE}"
 echo "╔════════════════════════════════════════════════════════════════════╗"
 echo "║         LINUX SUPPLY CHAIN VALIDATION SCANNER                     ║"
 echo "║         Based on Eclypsium Security Cheat Sheet                   ║"
+echo "╠════════════════════════════════════════════════════════════════════╣"
+printf "║  %-10s%-56.56s║\n" "Host:"   "$_banner_hostname"
+printf "║  %-10s%-56.56s║\n" "OS:"     "$_banner_os"
+printf "║  %-10s%-56.56s║\n" "Kernel:" "$_banner_kernel"
 echo "╚════════════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
