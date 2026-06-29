@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Mock sudo: logs argv, strips leading options (including `-u USER`), then execs
+# the remaining command so the real (stubbed) target runs and logs itself.
+printf 'sudo %s\n' "$*" >> "${STUB_LOG:-/dev/null}"
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        -u) shift 2 ;;
+        *)  shift ;;
+    esac
+done
+[[ $# -gt 0 ]] && exec "$@"
+exit 0

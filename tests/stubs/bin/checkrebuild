@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Mock checkrebuild: emits the fixture rebuild list if provided, else nothing.
+printf 'checkrebuild %s\n' "$*" >> "${STUB_LOG:-/dev/null}"
+[[ -f "${FX_REBUILD_FILE:-}" ]] && cat "$FX_REBUILD_FILE"
+exit 0

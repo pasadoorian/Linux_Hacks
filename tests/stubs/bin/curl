@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Mock curl: maps the request URL to a fixture file. CURL_FAIL=1 simulates a
+# network failure (non-zero exit) so degraded/offline code paths can be tested.
+printf 'curl %s\n' "$*" >> "${STUB_LOG:-/dev/null}"
+[[ -n "${CURL_FAIL:-}" ]] && exit 22
+
+url=""
+for a in "$@"; do [[ "$a" == http* ]] && url="$a"; done
+
+case "$url" in
+    *rpc/v5/info*)
+        # Emulate the AUR RPC: return only the packages actually requested via
+        # arg[]=NAME params, filtered out of the fixture's results array.
+        if [[ -f "${FX_RPC_FILE:-}" ]]; then
+            names=()
+            for a in "$@"; do
+                case "$a" in 'arg[]='*) names+=("${a#arg[]=}") ;; esac
+            done
+            want=$(printf '%s\n' "${names[@]}" | jq -R . | jq -s .)
+            jq --argjson want "$want" \
+               '{results: ((.results // []) | map(select(.Name as $n | $want | index($n))))}' \
+               "$FX_RPC_FILE"
+        else
+            echo '{}'
+        fi
+        ;;
+    *accounts.json*)     [[ -f "${FX_ACCOUNTS_FILE:-}" ]]   && cat "$FX_ACCOUNTS_FILE" ;;
+    *npm-packages.txt*)  [[ -f "${FX_NPM_FILE:-}" ]]        && cat "$FX_NPM_FILE" ;;
+    *packages-extra.txt*)[[ -f "${FX_PKGS_EXTRA_FILE:-}" ]] && cat "$FX_PKGS_EXTRA_FILE" ;;
+    *packages.txt*)      [[ -f "${FX_PKGS_FILE:-}" ]]       && cat "$FX_PKGS_FILE" ;;
+    *) : ;;
+esac
+exit 0

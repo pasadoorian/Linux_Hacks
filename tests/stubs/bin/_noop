@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Generic mock for commands we only need to record (not emulate). The command
+# name is taken from how it was invoked (argv0), so symlink real names to this.
+printf '%s %s\n' "$(basename "$0")" "$*" >> "${STUB_LOG:-/dev/null}"
+exit 0

@@ -1,0 +1,5 @@
+{
+  "accounts": {
+    "baduser": { "campaign": "test-campaign", "note": "known-malicious maintainer (fixture)" }
+  }
+}

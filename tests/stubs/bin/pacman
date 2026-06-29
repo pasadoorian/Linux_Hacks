@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Mock pacman: logs argv, serves fixture output for query subcommands, no-ops the rest.
+printf 'pacman %s\n' "$*" >> "${STUB_LOG:-/dev/null}"
+case "${1:-}" in
+    -Qmq)  [[ -f "${FX_FOREIGN_FILE:-}" ]] && cat "$FX_FOREIGN_FILE" ;;
+    -Qm)   [[ -f "${FX_QM_FILE:-}" ]]      && cat "$FX_QM_FILE" ;;
+    -Qtdq) [[ -f "${FX_ORPHANS_FILE:-}" ]] && cat "$FX_ORPHANS_FILE" ;;
+    -Qoq)  [[ -f "${FX_QOQ_FILE:-}" ]]     && cat "$FX_QOQ_FILE" ;;
+    *) : ;;  # -Syuu, -Scc, -Rsn, ... : record only
+esac
+exit 0

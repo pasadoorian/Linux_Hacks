@@ -16,10 +16,13 @@ local SUSPICIOUS = {
 -- which it writes to ~/.config/yay/allowlist.txt (one name/glob per line, '#'
 -- comments allowed). If that file is absent (hook used standalone), we fall
 -- back to a minimal built-in list.
-local function load_allow()
+local function load_allow(path)
   local allow = {}
-  local home = os.getenv("HOME")
-  local f = home and io.open(home .. "/.config/yay/allowlist.txt", "r")
+  if not path then
+    local home = os.getenv("HOME")
+    path = home and (home .. "/.config/yay/allowlist.txt")
+  end
+  local f = path and io.open(path, "r")
   if f then
     for raw in f:lines() do
       local line = raw:gsub("^%s+", ""):gsub("%s+$", "")

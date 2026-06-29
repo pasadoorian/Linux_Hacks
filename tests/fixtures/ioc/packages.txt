@@ -1,0 +1,3 @@
+# Known-malicious AUR package names (fixture)
+evil-pkg
+chaos-rat-bin
