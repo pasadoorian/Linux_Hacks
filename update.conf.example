@@ -1,0 +1,91 @@
+# =============================================================================
+# update.sh configuration   (example / template)
+# =============================================================================
+#
+# This file is sourced by update.sh as ROOT (the script self-elevates), so it
+# is plain bash: you may use variables, arrays, and comments. Keep it simple --
+# assignments only, no commands. update.sh refuses to source this file if it is
+# world-writable or not owned by you/root (see the safety gate in the script).
+#
+# Live location (auto-created from this template on first run):
+#     ~/.config/update.sh/config
+# Override per-run with:  update.sh --config /path/to/config
+# Skip entirely with:     update.sh --no-config
+# See the merged, effective settings with:  update.sh --print-config
+#
+# Precedence (lowest to highest):
+#     built-in defaults  <  this config file  <  command-line flags
+#
+# Every setting below is OPTIONAL. Anything you leave commented out keeps the
+# script's built-in default. The values shown are those built-in defaults.
+# -----------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------------
+# 1. DEFAULT BEHAVIOR
+# -----------------------------------------------------------------------------
+
+# DEFAULT_ACTIONS -- which checks run when you invoke update.sh with NO action
+# flags (e.g. just `update.sh`, or `update.sh -P` with only a modifier).
+# Order here does not matter; the script always runs them in its fixed order.
+# Valid tokens: clean orphans update rebuilds python-rebuild pacnew firmware
+#               kernel aur-audit aur-scan all
+# Note: `kernel`, `aur-audit`, and `aur-scan` are intentionally NOT in the
+# default set upstream (kernel is interactive; the AUR security checks are
+# explicit-only). You can add them here if you want them every run.
+#DEFAULT_ACTIONS=(clean orphans update rebuilds python-rebuild pacnew firmware)
+
+# UPDATER -- which backend `-u/--update` uses by default:
+#   yay    = official repos via pacman + AUR via yay, with PKGBUILD review (default)
+#   pacman = official repos only, no AUR
+#   pamac  = repos + AUR via pamac (the old default)
+# Overridden on the command line by -Y / -P / -m.
+#UPDATER="yay"
+
+# AUTO_REBUILD -- if true, the rebuild checks (-r and -y) will offer to rebuild
+# the affected packages (after a confirmation prompt) instead of only listing
+# them. Overridden on the command line by -R/--auto-rebuild.
+#AUTO_REBUILD=false
+
+# AUR_RECENT_DAYS -- in the AUR audit (-A), a package whose PKGBUILD changed
+# within this many days is tagged RECENTLY-CHANGED (a "give it a look" signal,
+# not a verdict). Lower = noisier/more cautious.
+#AUR_RECENT_DAYS=21
+
+# AUR_IOC_CAMPAIGNS -- which threat-intel campaigns from lenucksi/aur-malware-check
+# the audit (-A) and scan (-S) pull live IOC lists from. Remove ones you do not
+# care about, or add new campaign directory names as they are published.
+#AUR_IOC_CAMPAIGNS=(aur-infected chaos-rat russian-spam)
+
+
+# -----------------------------------------------------------------------------
+# 2. EXCLUSIONS
+# -----------------------------------------------------------------------------
+# All three lists accept EXACT package names and shell GLOBS, e.g.:
+#     "mailspring"      -> exact match
+#     "python-*"        -> every package starting with python-
+#     "*-git"           -> every -git package
+# Matching is case-sensitive (package names are lowercase by convention).
+
+# EXCLUDE_ALIEN -- foreign/AUR packages to SUPPRESS from the noise of the
+# foreign-package report (alien-pkgs.txt) and the AUR audit/scan output. Use
+# this for packages you have already vetted and do not want to keep re-reading.
+# The script prints how many entries it suppressed so nothing is hidden silently.
+# Example:
+#EXCLUDE_ALIEN=(brave-bin google-chrome visual-studio-code-bin)
+
+# KEEP_ORPHANS -- orphaned packages that should NEVER be offered for removal by
+# `-o/--orphans`. Use this to protect intentionally-installed leaf packages that
+# nothing depends on (so they look like orphans but you want to keep them).
+# Everything NOT matched here is listed and you are prompted before each removal.
+# Example:
+#KEEP_ORPHANS=(downgrade nvchecker python-pipx)
+
+# LUA_ALLOWLIST -- packages allowlisted in the advisory yay PKGBUILD tripwire
+# (the AURPreInstall hook). Listed packages are skipped by the hook's
+# supply-chain pattern scan, suppressing its warnings for software you trust to
+# legitimately use Node/Electron/JS build tooling. update.sh writes this list to
+# ~/.config/yay/allowlist.txt, which the hook reads at install time -- this file
+# is the single source of truth (do not hand-edit allowlist.txt).
+# Globs are honored here too (e.g. "*-electron").
+#LUA_ALLOWLIST=(mailspring)

@@ -11,10 +11,47 @@ local SUSPICIOUS = {
   "atomic-lockfile", "js-digest", "lockfile-js", "nextfile-js",  -- known IOCs
 }
 
--- Packages you know legitimately use Node/Electron tooling (suppress warnings):
-local ALLOW = {
-  ["mailspring"] = true,
-}
+-- Allowlist of packages that legitimately use Node/Electron tooling (their
+-- warnings are suppressed). The source of truth is update.sh's LUA_ALLOWLIST,
+-- which it writes to ~/.config/yay/allowlist.txt (one name/glob per line, '#'
+-- comments allowed). If that file is absent (hook used standalone), we fall
+-- back to a minimal built-in list.
+local function load_allow()
+  local allow = {}
+  local home = os.getenv("HOME")
+  local f = home and io.open(home .. "/.config/yay/allowlist.txt", "r")
+  if f then
+    for raw in f:lines() do
+      local line = raw:gsub("^%s+", ""):gsub("%s+$", "")
+      if line ~= "" and not line:match("^#") then
+        allow[#allow + 1] = line
+      end
+    end
+    f:close()
+    return allow                 -- honor the synced file as-is (may be empty)
+  end
+  return { "mailspring" }        -- file missing: built-in fallback
+end
+
+local ALLOW = load_allow()
+
+-- Translate a shell-style glob into an anchored Lua pattern (escape Lua magic
+-- chars except '*', then map '*' -> '.*').
+local function glob_to_pat(glob)
+  local p = glob:gsub("[%^%$%(%)%%%.%[%]%+%-%?]", "%%%1")
+  p = p:gsub("%*", ".*")
+  return "^" .. p .. "$"
+end
+
+local function is_allowed(name)
+  for _, pat in ipairs(ALLOW) do
+    if name == pat then return true end                       -- exact
+    if pat:find("*", 1, true) and name:match(glob_to_pat(pat)) then
+      return true                                             -- glob
+    end
+  end
+  return false
+end
 
 local function warn(msg)
   io.stderr:write("\n  [yay-tripwire WARNING] " .. msg .. "\n")
@@ -34,7 +71,7 @@ end
 yay.create_autocmd("AURPreInstall", {
   desc = "Advisory scan of PKGBUILD + .install for supply-chain patterns",
   callback = function(event)
-    if ALLOW[event.match] then return end
+    if is_allowed(event.match) then return end
 
     -- Always scan the PKGBUILD text from the payload.
     local files = { PKGBUILD = event.data.pkgbuild }

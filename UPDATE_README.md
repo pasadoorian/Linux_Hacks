@@ -28,7 +28,7 @@ the June 2026 **"Atomic Arch"** AUR compromise.
 7. [AUR scan (`-S`) — malware IOC checks](#aur-scan--s--malware-ioc-checks)
 8. [Background: the Atomic Arch attack](#background-the-atomic-arch-attack)
 9. [Recommended workflows](#recommended-workflows)
-10. [State files & configuration](#state-files--configuration)
+10. [Configuration](#configuration)
 11. [Safety notes & caveats](#safety-notes--caveats)
 
 ---
@@ -71,13 +71,14 @@ The `-A` audit and `-S` scan require **`curl` + `jq`** and an internet connectio
 
 ## All options
 
-Actions are additive — pass as many as you like. With **no arguments**, the
-script runs `--all`.
+Actions are additive — pass as many as you like. With **no action flags**, the
+script runs the configured **`DEFAULT_ACTIONS`** set (the built-in default
+matches the old `--all` behavior — see [Configuration](#configuration)).
 
 | Flag | Long form | Action |
 |------|-----------|--------|
 | `-c` | `--clean` | Clean pacman/pamac/yay/paru caches and stale db locks |
-| `-o` | `--orphans` | Save foreign-package list to `~/alien-pkgs.txt`, remove true orphans |
+| `-o` | `--orphans` | Save foreign-package list to `~/alien-pkgs.txt` (minus `EXCLUDE_ALIEN`), then prompt before removing each orphan (skipping `KEEP_ORPHANS`) |
 | `-u` | `--update` | Full system update (**yay by default**: pacman repos + yay AUR; see modifiers) |
 | `-r` | `--rebuilds` | List packages needing rebuild (`checkrebuild`); rebuild with `-R` |
 | `-y` | `--python-rebuild` | Find packages built against an old Python; rebuild with `-R` |
@@ -125,6 +126,17 @@ three select the `-u` update backend — **the default is `yay`** if none is giv
 
 > The backend flags are mutually exclusive; if you pass more than one, the **last
 > one on the command line wins**. With no backend flag, `-u` uses **yay**.
+
+### Configuration flags
+
+These control the config file (see [Configuration](#configuration)); they are
+not actions, so on their own the `DEFAULT_ACTIONS` set still runs.
+
+| Flag | Effect |
+|------|--------|
+| `--config FILE` | Use `FILE` instead of `~/.config/update.sh/config` |
+| `--no-config` | Ignore the config file entirely; use built-in defaults |
+| `--print-config` | Print the **effective** settings (defaults + config + CLI) and exit |
 
 ---
 
@@ -436,23 +448,55 @@ sudo ~/update.sh -u -m
 
 ---
 
-## State files & configuration
+## Configuration
+
+`update.sh` reads an optional config file, sourced as bash:
+
+```
+~/.config/update.sh/config
+```
+
+On the first run it is **auto-created** from [`update.conf.example`](update.conf.example)
+(which documents every setting). Point at a different file with `--config FILE`,
+skip it with `--no-config`, and inspect the merged result with `--print-config`.
+
+**Precedence** (lowest → highest): built-in defaults → config file → CLI flags.
+A CLI flag always wins over the config (e.g. `-P` overrides `UPDATER="yay"`).
+
+**Safety gate:** because the file is sourced **as root**, the script refuses to
+read it if it is world-writable or not owned by you or root, falling back to
+built-in defaults with a warning.
+
+### Settings
+
+| Setting | Type | Default | Meaning |
+|---------|------|---------|---------|
+| `DEFAULT_ACTIONS` | list | `clean orphans update rebuilds python-rebuild pacnew firmware` | Checks to run when no action flag is given |
+| `UPDATER` | `yay`/`pacman`/`pamac` | `yay` | Default `-u` backend (overridden by `-Y`/`-P`/`-m`) |
+| `AUTO_REBUILD` | bool | `false` | Default for `-R` (rebuild on `-r`/`-y`) |
+| `AUR_RECENT_DAYS` | int | `21` | Days within which a PKGBUILD counts as `RECENTLY-CHANGED` |
+| `AUR_IOC_CAMPAIGNS` | list | `aur-infected chaos-rat russian-spam` | Threat-intel campaigns `-A`/`-S` load |
+| `EXCLUDE_ALIEN` | list | *(empty)* | Foreign pkgs suppressed from `~/alien-pkgs.txt` and the `-A`/`-S` reports |
+| `KEEP_ORPHANS` | list | *(empty)* | Orphans never offered for removal by `-o` |
+| `LUA_ALLOWLIST` | list | `mailspring` | Pkgs allowlisted in the yay tripwire hook |
+
+All three list-type exclusions accept **exact names or shell globs**
+(`python-*`, `*-git`). Suppression counts are printed so nothing is hidden
+silently. `LUA_ALLOWLIST` is written to `~/.config/yay/allowlist.txt` (which the
+`init.lua` hook reads) on every run — that config entry is the single source of
+truth, so don't hand-edit `allowlist.txt`.
+
+> A handful of internal constants (`AUR_IOC_RAW_BASE`, `AUR_SEED_BAD_NPM`,
+> `AUR_STATE_DIR`) remain near the top of `update.sh` for rare manual tweaks.
+
+### State files
 
 | Path | Purpose |
 |------|---------|
 | `~/aur-audit.txt` | Full per-package audit report (overwritten each `-A` run) |
-| `~/alien-pkgs.txt` | Foreign-package list saved by `-o` |
+| `~/alien-pkgs.txt` | Foreign-package list saved by `-o` (minus `EXCLUDE_ALIEN`) |
 | `~/.cache/update-aur/maintainers.json` | Maintainer snapshot for re-adoption detection |
-
-**Tunable variables** (near the top of `update.sh`):
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `AUR_IOC_RAW_BASE` | lenucksi/aur-malware-check raw URL | Where `-S` fetches IOC lists |
-| `AUR_IOC_CAMPAIGNS` | `aur-infected chaos-rat russian-spam` | Which campaigns to load |
-| `AUR_RECENT_DAYS` | `21` | Days within which a PKGBUILD counts as `RECENTLY-CHANGED` |
-| `AUR_SEED_BAD_NPM` | atomic-lockfile, js-digest, … | Offline fallback npm blocklist |
-| `AUR_STATE_DIR` | `~/.cache/update-aur` | Where the maintainer snapshot lives |
+| `~/.config/yay/allowlist.txt` | Tripwire allowlist, synced from `LUA_ALLOWLIST` |
 
 ---
 

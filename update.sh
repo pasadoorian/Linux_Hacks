@@ -51,8 +51,145 @@ AUR_SEED_BAD_NPM=(atomic-lockfile js-digest lockfile-js nextfile-js)
 AUR_RECENT_DAYS=21
 
 # =============================================================================
+# Config-file defaults (overridable by ~/.config/update.sh/config, then CLI)
+# =============================================================================
+
+# Directory holding the real update.sh (resolved through any ~/update.sh symlink)
+# so we can find update.conf.example for first-run seeding.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# Live config file (sourced as root; see load_config for the safety gate).
+CONFIG_FILE="$USER_HOME/.config/update.sh/config"
+
+# Which checks run when no action flags are given (see update.conf.example for
+# the full token list). kept conservative to match historical behavior.
+DEFAULT_ACTIONS=(clean orphans update rebuilds python-rebuild pacnew firmware)
+
+# Exclusion lists (exact names or shell globs). Empty by default.
+EXCLUDE_ALIEN=()    # foreign pkgs suppressed from reports
+KEEP_ORPHANS=()     # orphans never offered for removal
+LUA_ALLOWLIST=(mailspring)  # pkgs allowlisted in the yay tripwire hook
+
+# File the yay init.lua hook reads its allowlist from (we keep it in sync).
+YAY_ALLOWLIST_FILE="$USER_HOME/.config/yay/allowlist.txt"
+
+# Config control flags (set by --config/--no-config/--print-config pre-scan).
+NO_CONFIG=false
+PRINT_CONFIG=false
+
+# Track whether the user named any action on the CLI; if not, DEFAULT_ACTIONS apply.
+ACTIONS_SPECIFIED=false
+
+# =============================================================================
 # Helper Functions
 # =============================================================================
+
+# Return 0 if $1 matches any of the remaining args as an exact name or glob.
+matches_any() {
+    local name="$1"; shift
+    local pat
+    for pat in "$@"; do
+        [[ -z "$pat" ]] && continue
+        # shellcheck disable=SC2053  -- intentional glob match (RHS unquoted)
+        [[ "$name" == $pat ]] && return 0
+    done
+    return 1
+}
+
+# Source the config file as root, with a safety gate (we are running as root, so
+# a writable-by-others config would be a privilege-escalation hole). Auto-seeds
+# the live config from the repo template on first run.
+load_config() {
+    local f="$CONFIG_FILE"
+
+    if [[ ! -f "$f" && -f "$SCRIPT_DIR/update.conf.example" ]]; then
+        mkdir -p "$(dirname "$f")"
+        cp "$SCRIPT_DIR/update.conf.example" "$f"
+        chown -R "$SUDO_USER:$SUDO_USER" "$USER_HOME/.config/update.sh" 2>/dev/null || true
+        echo "Created default config at $f (from update.conf.example)."
+    fi
+
+    if [[ ! -f "$f" ]]; then
+        echo "No config file at $f; using built-in defaults."
+        return 0
+    fi
+
+    local owner perms
+    owner=$(stat -c '%U' "$f")
+    perms=$(stat -c '%a' "$f")
+    if [[ "$owner" != "root" && "$owner" != "$SUDO_USER" ]]; then
+        echo "WARNING: $f is owned by '$owner' (not root/$SUDO_USER); refusing to source it." >&2
+        return 0
+    fi
+    if [[ "${perms: -1}" =~ [2367] ]]; then   # world-writable (other has 'w')
+        echo "WARNING: $f is world-writable; refusing to source it. Fix with: chmod o-w '$f'" >&2
+        return 0
+    fi
+
+    # shellcheck source=/dev/null
+    source "$f"
+}
+
+# Expand DEFAULT_ACTIONS (config-defined) into the DO_* flags. Used only when no
+# action flag was given on the command line.
+apply_default_actions() {
+    local a
+    for a in "${DEFAULT_ACTIONS[@]}"; do
+        case "$a" in
+            clean)          DO_CLEAN=true ;;
+            orphans)        DO_ORPHANS=true ;;
+            update)         DO_UPDATE=true ;;
+            rebuilds)       DO_REBUILDS=true ;;
+            python-rebuild) DO_PYTHON_REBUILD=true ;;
+            pacnew)         DO_PACNEW=true ;;
+            firmware)       DO_FIRMWARE=true ;;
+            kernel)         DO_KERNEL=true ;;
+            aur-audit)      DO_AUR_AUDIT=true ;;
+            aur-scan)       DO_AUR_SCAN=true ;;
+            all)            RUN_ALL=true ;;
+            *) echo "Config: ignoring unknown action '$a' in DEFAULT_ACTIONS." >&2 ;;
+        esac
+    done
+}
+
+# Print the effective configuration (defaults + config file + CLI overrides).
+print_config() {
+    echo "Effective configuration"
+    echo "----------------------------------------------"
+    printf '  %-18s %s\n' "config file"      "$($NO_CONFIG && echo "(skipped: --no-config)" || echo "$CONFIG_FILE")"
+    printf '  %-18s %s\n' "UPDATER"          "$UPDATER"
+    printf '  %-18s %s\n' "AUTO_REBUILD"     "$AUTO_REBUILD"
+    printf '  %-18s %s\n' "AUR_RECENT_DAYS"  "$AUR_RECENT_DAYS"
+    printf '  %-18s %s\n' "DEFAULT_ACTIONS"  "${DEFAULT_ACTIONS[*]:-(none)}"
+    printf '  %-18s %s\n' "AUR_IOC_CAMPAIGNS" "${AUR_IOC_CAMPAIGNS[*]:-(none)}"
+    printf '  %-18s %s\n' "EXCLUDE_ALIEN"    "${EXCLUDE_ALIEN[*]:-(none)}"
+    printf '  %-18s %s\n' "KEEP_ORPHANS"     "${KEEP_ORPHANS[*]:-(none)}"
+    printf '  %-18s %s\n' "LUA_ALLOWLIST"    "${LUA_ALLOWLIST[*]:-(none)}"
+}
+
+# Write LUA_ALLOWLIST to the file the yay init.lua hook reads, so the config
+# stays the single source of truth for the tripwire allowlist.
+sync_lua_allowlist() {
+    local f="$YAY_ALLOWLIST_FILE"
+    mkdir -p "$(dirname "$f")"
+    if ((${#LUA_ALLOWLIST[@]})); then
+        printf '%s\n' "${LUA_ALLOWLIST[@]}" > "$f"
+    else
+        : > "$f"
+    fi
+    chown -R "$SUDO_USER:$SUDO_USER" "$(dirname "$f")" 2>/dev/null || true
+}
+
+# Emit installed foreign (AUR) package names, one per line, with EXCLUDE_ALIEN
+# entries filtered out. Shared by the AUR audit and scan.
+get_foreign_filtered() {
+    local fp
+    while IFS= read -r fp; do
+        [[ -z "$fp" ]] && continue
+        matches_any "$fp" "${EXCLUDE_ALIEN[@]}" && continue
+        echo "$fp"
+    done < <(pacman -Qmq 2>/dev/null || true)
+}
 
 usage() {
     cat <<EOF
@@ -85,6 +222,11 @@ Modifiers (select the -u backend; default is yay):
   -P, --pacman       Official repos only via pacman (no AUR)
   -m, --pamac        Repos + AUR via pamac (the old default)
   -R, --auto-rebuild Rebuild packages with outdated dependencies (with confirmation)
+
+Configuration (see update.conf.example):
+      --config FILE  Use FILE instead of ~/.config/update.sh/config
+      --no-config    Ignore the config file; use built-in defaults only
+      --print-config Print the effective configuration and exit
 
 Examples:
   $(basename "$0")           # Run all actions; AUR updated via yay (with review)
@@ -140,12 +282,65 @@ clean_caches() {
 check_foreign_orphans() {
     print_section "Checking for foreign and orphaned packages..."
 
-    # List foreign (AUR) packages for manual review - do not auto-remove
-    pamac list --foreign > "$USER_HOME/alien-pkgs.txt"
+    # --- Foreign (AUR) packages, minus EXCLUDE_ALIEN, saved for manual review ---
+    local line name excluded=0
+    : > "$USER_HOME/alien-pkgs.txt"
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        name=${line%% *}
+        if matches_any "$name" "${EXCLUDE_ALIEN[@]}"; then
+            excluded=$((excluded + 1))
+            continue
+        fi
+        echo "$line" >> "$USER_HOME/alien-pkgs.txt"
+    done < <(pacman -Qm 2>/dev/null || true)
+    chown "$SUDO_USER:$SUDO_USER" "$USER_HOME/alien-pkgs.txt" 2>/dev/null || true
     echo "Foreign packages saved to $USER_HOME/alien-pkgs.txt for review"
+    (( excluded > 0 )) && echo "  ($excluded foreign package(s) suppressed by EXCLUDE_ALIEN)"
 
-    # Remove true orphans (packages not required by anything)
-    sudo -u "$SUDO_USER" pamac remove --orphans --unneeded || true
+    # --- Orphans: protect KEEP_ORPHANS, then confirm each remaining removal ---
+    local orphans=() removable=() protected=() op
+    mapfile -t orphans < <(pacman -Qtdq 2>/dev/null || true)
+    if ((${#orphans[@]} == 0)); then
+        echo "No orphaned packages found."
+        return 0
+    fi
+    for op in "${orphans[@]}"; do
+        if matches_any "$op" "${KEEP_ORPHANS[@]}"; then
+            protected+=("$op")
+        else
+            removable+=("$op")
+        fi
+    done
+    ((${#protected[@]})) && echo "Protected orphans (KEEP_ORPHANS): ${protected[*]}"
+    if ((${#removable[@]} == 0)); then
+        echo "No removable orphans after applying KEEP_ORPHANS."
+        return 0
+    fi
+
+    echo "Orphaned packages eligible for removal:"
+    printf '  %s\n' "${removable[@]}"
+    echo ""
+
+    local to_remove=() ans all=false
+    for op in "${removable[@]}"; do
+        if $all; then to_remove+=("$op"); continue; fi
+        read -r -p "Remove orphan '$op'? [y/n/a=all/q=quit] " ans
+        case "$ans" in
+            y|Y) to_remove+=("$op") ;;
+            a|A) all=true; to_remove+=("$op") ;;
+            q|Q) break ;;
+            *)   : ;;  # anything else = skip this one
+        esac
+    done
+
+    if ((${#to_remove[@]})); then
+        echo "Removing: ${to_remove[*]}"
+        # -Rsn: also remove now-unneeded deps and saved config (.pacsave).
+        pacman -Rsn --noconfirm "${to_remove[@]}"
+    else
+        echo "No orphans removed."
+    fi
 }
 
 perform_update() {
@@ -386,11 +581,12 @@ aur_audit() {
     fi
 
     local foreign
-    foreign=$(pacman -Qmq 2>/dev/null || true)
+    foreign=$(get_foreign_filtered)
     if [[ -z "$foreign" ]]; then
-        echo "No foreign (AUR) packages installed."
+        echo "No foreign (AUR) packages installed (after EXCLUDE_ALIEN)."
         return 0
     fi
+    ((${#EXCLUDE_ALIEN[@]})) && echo "(EXCLUDE_ALIEN active: ${EXCLUDE_ALIEN[*]})"
 
     mkdir -p "$AUR_STATE_DIR"
     local report="$USER_HOME/aur-audit.txt"
@@ -526,11 +722,12 @@ aur_scan() {
     print_section "AUR supply-chain scan (live IOCs)..."
 
     local foreign
-    foreign=$(pacman -Qmq 2>/dev/null || true)
+    foreign=$(get_foreign_filtered)
     if [[ -z "$foreign" ]]; then
-        echo "No foreign (AUR) packages installed."
+        echo "No foreign (AUR) packages installed (after EXCLUDE_ALIEN)."
         return 0
     fi
+    ((${#EXCLUDE_ALIEN[@]})) && echo "(EXCLUDE_ALIEN active: ${EXCLUDE_ALIEN[*]})"
 
     local findings=0
 
@@ -630,6 +827,9 @@ aur_scan() {
 # =============================================================================
 
 main() {
+    # Keep the yay tripwire allowlist in sync with the config (cheap, always).
+    sync_lua_allowlist
+
     if $RUN_ALL || $DO_CLEAN; then
         clean_caches
     fi
@@ -679,55 +879,65 @@ main() {
 # Argument Parsing
 # =============================================================================
 
-# If no arguments, run all
-if [[ $# -eq 0 ]]; then
-    RUN_ALL=true
-fi
+# Pre-scan for config-control flags so the config is loaded (and possibly
+# redirected) BEFORE the main parse, while CLI action flags still win over it.
+_pre=("$@")
+_i=0
+while [[ $_i -lt ${#_pre[@]} ]]; do
+    case "${_pre[$_i]}" in
+        --no-config)    NO_CONFIG=true ;;
+        --print-config) PRINT_CONFIG=true ;;
+        --config)       _i=$((_i + 1)); CONFIG_FILE="${_pre[$_i]:-$CONFIG_FILE}" ;;
+    esac
+    _i=$((_i + 1))
+done
+
+$NO_CONFIG || load_config
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -c|--clean)
-            DO_CLEAN=true
+            DO_CLEAN=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -o|--orphans)
-            DO_ORPHANS=true
+            DO_ORPHANS=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -u|--update)
-            DO_UPDATE=true
+            DO_UPDATE=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -r|--rebuilds)
-            DO_REBUILDS=true
+            DO_REBUILDS=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -y|--python-rebuild)
-            DO_PYTHON_REBUILD=true
+            DO_PYTHON_REBUILD=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -p|--pacnew)
-            DO_PACNEW=true
+            DO_PACNEW=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -f|--firmware)
-            DO_FIRMWARE=true
+            DO_FIRMWARE=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -k|--kernel)
-            DO_KERNEL=true
+            DO_KERNEL=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -A|--aur-audit)
-            DO_AUR_AUDIT=true
+            DO_AUR_AUDIT=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -S|--aur-scan)
-            DO_AUR_SCAN=true
+            DO_AUR_SCAN=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -a|--all)
-            RUN_ALL=true
+            RUN_ALL=true; ACTIONS_SPECIFIED=true
             shift
             ;;
         -P|--pacman)
@@ -746,6 +956,13 @@ while [[ $# -gt 0 ]]; do
             AUTO_REBUILD=true
             shift
             ;;
+        # Config-control flags (already handled by the pre-scan above).
+        --no-config|--print-config)
+            shift
+            ;;
+        --config)
+            shift 2   # flag + its value
+            ;;
         -h|--help)
             usage
             exit 0
@@ -757,6 +974,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# No action named on the CLI -> fall back to the configured default set.
+$ACTIONS_SPECIFIED || apply_default_actions
+
+# --print-config short-circuits: show the merged settings and exit.
+if $PRINT_CONFIG; then
+    print_config
+    exit 0
+fi
 
 main
 
