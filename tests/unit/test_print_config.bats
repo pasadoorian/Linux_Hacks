@@ -26,8 +26,8 @@ teardown() { teardown_update_env; }
     run bash "$REPO_ROOT/update.sh" --no-config --print-config
     assert_success
     assert_output --partial "Effective configuration"
-    refute_output --partial "Cleaning Package"
-    refute_output --partial "Performing update"
+    refute_output --partial "Cleaning caches"
+    refute_output --partial "Updating packages"
 }
 
 @test "--print-config reflects CLI override of the backend" {

@@ -9,29 +9,29 @@ teardown() { teardown_update_env; }
 @test "no action flag runs the default action set" {
     run bash "$REPO_ROOT/update.sh" --no-config
     assert_success
-    assert_output --partial "Checking for firmware updates"   # a DEFAULT_ACTIONS member
-    refute_output --partial "AUR audit"                       # -A is opt-in only
-    refute_output --partial "Kernel Management"               # -k is opt-in only
+    assert_output --partial "Firmware"          # a DEFAULT_ACTIONS member
+    refute_output --partial "AUR audit"         # -A is opt-in only
+    refute_output --partial "Kernel management" # -k is opt-in only
 }
 
 @test "--all runs the default set but not the opt-in checks" {
     run bash "$REPO_ROOT/update.sh" --no-config --all
     assert_success
-    assert_output --partial "Performing update"
+    assert_output --partial "Updating packages"
     refute_output --partial "AUR supply-chain scan"
 }
 
 @test "a single action runs only that section" {
     run bash "$REPO_ROOT/update.sh" --no-config -f
     assert_success
-    assert_output --partial "Checking for firmware updates"
-    refute_output --partial "Performing update"
+    assert_output --partial "Firmware"
+    refute_output --partial "Updating packages"
 }
 
 @test "modifier-only invocation still runs the default actions" {
     run bash "$REPO_ROOT/update.sh" --no-config -P
     assert_success
-    assert_output --partial "Performing update"
+    assert_output --partial "Updating packages"
     assert stub_called "pacman -Syuu"   # -P selected the pacman backend
 }
 
@@ -53,5 +53,5 @@ teardown() { teardown_update_env; }
     run bash "$REPO_ROOT/update.sh" --no-config -A
     assert_success
     assert_output --partial "AUR audit"
-    refute_output --partial "Performing update"
+    refute_output --partial "Updating packages"
 }

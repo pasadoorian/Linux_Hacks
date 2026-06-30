@@ -70,6 +70,10 @@ UPDATE_SH_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=lib/aur-common.sh
 source "$UPDATE_SH_DIR/lib/aur-common.sh"
 
+# Shared terminal-output helpers (section/ok/warn/err/note/run_quiet/summary).
+# shellcheck source=lib/output.sh
+source "$UPDATE_SH_DIR/lib/output.sh"
+
 # Live config file (sourced as root; see load_config for the safety gate).
 CONFIG_FILE="$USER_HOME/.config/update.sh/config"
 
@@ -88,6 +92,10 @@ YAY_ALLOWLIST_FILE="$USER_HOME/.config/yay/allowlist.txt"
 # Config control flags (set by --config/--no-config/--print-config pre-scan).
 NO_CONFIG=false
 PRINT_CONFIG=false
+
+# Output verbosity (set by -v/--verbose, -q/--quiet; --no-color disables color).
+VERBOSE=false
+QUIET=false
 
 # Track whether the user named any action on the CLI; if not, DEFAULT_ACTIONS apply.
 ACTIONS_SPECIFIED=false
@@ -225,6 +233,11 @@ Modifiers (select the -u backend; default is yay):
   -m, --pamac        Repos + AUR via pamac (the old default)
   -R, --auto-rebuild Rebuild packages with outdated dependencies (with confirmation)
 
+Output:
+  -v, --verbose      Show full output from cache/mirror/firmware sub-commands
+  -q, --quiet        Only show warnings and errors (suppress status/headers)
+      --no-color     Disable colored output (also honors NO_COLOR)
+
 Configuration (see update.conf.example):
       --config FILE  Use FILE instead of ~/.config/update.sh/config
       --no-config    Ignore the config file; use built-in defaults only
@@ -246,29 +259,26 @@ Examples:
 EOF
 }
 
-print_section() {
-    echo "$1"
-    echo "----------------------------------------------"
-}
-
 # =============================================================================
 # Core Functions
 # =============================================================================
+# Section headers + step counters are printed by run_action() in main(); the
+# functions themselves only emit status (ok/warn/err/note) and findings.
 
 clean_caches() {
-    print_section "Cleaning Package and Build Caches..."
+    section "Cleaning caches"
 
     # Remove stale package database lock if present
     rm -f /var/lib/pacman/db.lck
 
     # Clear pacman cache (all uninstalled packages)
-    pacman -Scc --noconfirm
+    run_quiet "pacman cache cleared" pacman -Scc --noconfirm || true
 
     # Clear pamac cache as the real user. pamac's AUR database is per-user, so
     # running it as root (this script auto-elevates) triggers a spurious
     # "Failed to synchronize AUR database" warning. '|| true' keeps a clean
     # hiccup from aborting the run under 'set -e'.
-    sudo -u "$SUDO_USER" pamac clean --no-confirm || true
+    run_quiet "pamac cache cleared" sudo -u "$SUDO_USER" pamac clean --no-confirm || true
 
     # Clear AUR/pamac build caches
     rm -rf "$USER_HOME/.cache/pamac"
@@ -280,12 +290,11 @@ clean_caches() {
     # Clear paru cache (if using paru)
     rm -rf "$USER_HOME/.cache/paru" 2>/dev/null || true
 
-    # Optional: keep only one cached version of each package for rollback
-    # paccache -rk1
+    summary_add "caches cleaned"
 }
 
 check_foreign_orphans() {
-    print_section "Checking for foreign and orphaned packages..."
+    section "Foreign & orphaned packages"
 
     # --- Foreign (AUR) packages, minus EXCLUDE_ALIEN, saved for manual review ---
     local line name excluded=0
@@ -300,14 +309,14 @@ check_foreign_orphans() {
         echo "$line" >> "$USER_HOME/alien-pkgs.txt"
     done < <(pacman -Qm 2>/dev/null || true)
     chown "$SUDO_USER:$SUDO_USER" "$USER_HOME/alien-pkgs.txt" 2>/dev/null || true
-    echo "Foreign packages saved to $USER_HOME/alien-pkgs.txt for review"
-    (( excluded > 0 )) && echo "  ($excluded foreign package(s) suppressed by EXCLUDE_ALIEN)"
+    note "Foreign packages saved to $USER_HOME/alien-pkgs.txt for review"
+    (( excluded > 0 )) && note "$excluded foreign package(s) suppressed by EXCLUDE_ALIEN"
 
     # --- Orphans: protect KEEP_ORPHANS, then confirm each remaining removal ---
     local orphans=() removable=() protected=() op
     mapfile -t orphans < <(pacman -Qtdq 2>/dev/null || true)
     if ((${#orphans[@]} == 0)); then
-        echo "No orphaned packages found."
+        ok "No orphaned packages found."
         return 0
     fi
     for op in "${orphans[@]}"; do
@@ -317,20 +326,20 @@ check_foreign_orphans() {
             removable+=("$op")
         fi
     done
-    ((${#protected[@]})) && echo "Protected orphans (KEEP_ORPHANS): ${protected[*]}"
+    ((${#protected[@]})) && note "Protected orphans (KEEP_ORPHANS): ${protected[*]}"
     if ((${#removable[@]} == 0)); then
-        echo "No removable orphans after applying KEEP_ORPHANS."
+        ok "No removable orphans after applying KEEP_ORPHANS."
         return 0
     fi
 
-    echo "Orphaned packages eligible for removal:"
-    printf '  %s\n' "${removable[@]}"
+    note "Orphaned packages eligible for removal:"
+    printf '    %s\n' "${removable[@]}"
     echo ""
 
     local to_remove=() ans all=false
     for op in "${removable[@]}"; do
         if $all; then to_remove+=("$op"); continue; fi
-        read -r -p "Remove orphan '$op'? [y/n/a=all/q=quit] " ans
+        read -r -p "  Remove orphan '$op'? [y/n/a=all/q=quit] " ans
         case "$ans" in
             y|Y) to_remove+=("$op") ;;
             a|A) all=true; to_remove+=("$op") ;;
@@ -340,19 +349,20 @@ check_foreign_orphans() {
     done
 
     if ((${#to_remove[@]})); then
-        echo "Removing: ${to_remove[*]}"
+        note "Removing: ${to_remove[*]}"
         # -Rsn: also remove now-unneeded deps and saved config (.pacsave).
         pacman -Rsn --noconfirm "${to_remove[@]}"
+        summary_add "${#to_remove[@]} orphan(s) removed"
     else
-        echo "No orphans removed."
+        ok "No orphans removed."
     fi
 }
 
 perform_update() {
-    print_section "Performing update..."
+    section "Updating packages"
 
     # Refresh the mirrors list and select the fastest ones
-    pacman-mirrors -f
+    run_quiet "Mirrors refreshed" pacman-mirrors -f || true
 
     case "$UPDATER" in
         yay)
@@ -362,45 +372,49 @@ perform_update() {
             # menus force a review of every PKGBUILD/diff before anything builds.
             # AUR builds must NOT run as root, hence sudo -u "$SUDO_USER".
             if ! command -v yay >/dev/null 2>&1; then
-                echo "yay not found. Install with: pamac build yay"
-                echo "  (or use -P for pacman-only, or -m for pamac)"
+                err "yay not found. Install with: pamac build yay"
+                note "(or use -P for pacman-only, or -m for pamac)"
                 return 1
             fi
-            echo "Refreshing official repos with pacman..."
+            note "Refreshing official repos with pacman..."
             pacman -Syuu --noconfirm
             echo ""
-            echo "Updating AUR packages with yay (PKGBUILD review enabled)..."
-            echo "Tip: run '$(basename "$0") -A -S' first to audit + scan before building."
+            note "Updating AUR packages with yay (PKGBUILD review enabled)..."
             sudo -u "$SUDO_USER" yay -Syu --aur --devel \
                 --combinedupgrade --cleanafter \
                 --answerdiff None --answeredit None --diffmenu=true --editmenu=true
+            summary_add "packages updated (yay: repos + AUR)"
+            next_step "Check AUR packages before the next build: $(basename "$0") -A -S"
             ;;
         pacman)
             # Official repos only (no AUR)
-            echo "Using pacman for update (official repos only)..."
+            note "Updating official repos only (pacman, no AUR)..."
             pacman -Syuu
+            summary_add "packages updated (pacman, repos only)"
             ;;
         pamac)
             # Update using pamac as original user (AUR requires non-root)
-            echo "Using pamac for update..."
+            note "Updating via pamac..."
             sudo -u "$SUDO_USER" pamac update -a --enable-downgrade --force-refresh
+            summary_add "packages updated (pamac)"
             ;;
     esac
 }
 
 check_rebuilds() {
-    print_section "The following packages may require a re-build:"
+    section "Rebuild check"
 
     # Get list of packages needing rebuild
     local rebuild_output
     rebuild_output=$(checkrebuild)
 
     if [[ -z "$rebuild_output" ]]; then
-        echo "No packages need rebuilding."
+        ok "No packages need rebuilding."
         return 0
     fi
 
-    # Display packages
+    # Display packages (this is content the user needs to see)
+    note "Packages that may require a rebuild:"
     echo "$rebuild_output"
 
     # If auto-rebuild is enabled, prompt for confirmation
@@ -409,38 +423,42 @@ check_rebuilds() {
         packages=$(echo "$rebuild_output" | awk '{print $2}')
 
         echo ""
-        echo "The following packages will be rebuilt:"
+        note "The following packages will be rebuilt:"
         echo "$packages"
         echo ""
-        read -r -p "Rebuild these packages? (y/n): " confirm
+        read -r -p "  Rebuild these packages? (y/n): " confirm
 
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            echo "Rebuilding packages..."
+            note "Rebuilding packages..."
             sudo -u "$SUDO_USER" pamac build $packages
+            summary_add "rebuilt packages with outdated deps"
         else
-            echo "Skipping rebuild."
+            note "Skipping rebuild."
         fi
+    else
+        summary_add "$(echo "$rebuild_output" | grep -c .) package(s) may need rebuilding"
+        next_step "Rebuild them: $(basename "$0") -r -R"
     fi
 }
 
 check_python_rebuilds() {
-    print_section "Checking for Python packages needing rebuild..."
+    section "Python rebuild check"
 
     # Get current Python version (e.g., "3.13")
     local current_version
     current_version=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-    echo "Current Python version: $current_version"
+    note "Current Python version: $current_version"
 
     # Find old Python directories in /usr/lib/
     local old_dirs
     old_dirs=$(ls -d /usr/lib/python3.* 2>/dev/null | grep -v "python${current_version}" || true)
 
     if [[ -z "$old_dirs" ]]; then
-        echo "No old Python directories found. System is up to date."
+        ok "No old Python directories found; nothing to rebuild."
         return 0
     fi
 
-    echo "Found old Python directories:"
+    note "Found old Python directories:"
     echo "$old_dirs"
     echo ""
 
@@ -450,7 +468,7 @@ check_python_rebuilds() {
         local dir_packages
         dir_packages=$(pacman -Qoq "$dir" 2>/dev/null || true)
         if [[ -n "$dir_packages" ]]; then
-            echo "Packages with files in $dir:"
+            note "Packages with files in $dir:"
             echo "$dir_packages"
             echo ""
             all_packages="$all_packages $dir_packages"
@@ -462,39 +480,59 @@ check_python_rebuilds() {
     unique_packages=$(echo "$all_packages" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
 
     if [[ -z "$unique_packages" ]]; then
-        echo "No packages need rebuilding for the new Python version."
+        ok "No packages need rebuilding for the new Python version."
         return 0
     fi
 
     # If auto-rebuild is enabled, prompt for confirmation
     if $AUTO_REBUILD; then
-        echo "The following packages will be rebuilt for Python $current_version:"
+        note "The following packages will be rebuilt for Python $current_version:"
         echo "$unique_packages" | tr ' ' '\n'
         echo ""
-        read -r -p "Rebuild these packages? (y/n): " confirm
+        read -r -p "  Rebuild these packages? (y/n): " confirm
 
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            echo "Rebuilding packages..."
+            note "Rebuilding packages..."
             sudo -u "$SUDO_USER" pamac build $unique_packages
+            summary_add "rebuilt packages for Python $current_version"
         else
-            echo "Skipping rebuild."
+            note "Skipping rebuild."
         fi
+    else
+        next_step "Rebuild for Python $current_version: $(basename "$0") -y -R"
     fi
 }
 
 check_pacnew() {
-    print_section "The following pacnew files may require attention:"
-    pacdiff -o
+    section "Pacnew files"
+    local pacnew
+    pacnew=$(pacdiff -o 2>/dev/null || true)
+    if [[ -z "$pacnew" ]]; then
+        ok "No .pacnew files to merge."
+        return 0
+    fi
+    note "Pacnew files needing attention:"
+    echo "$pacnew"
+    summary_add "$(echo "$pacnew" | grep -c .) .pacnew file(s) to merge"
+    next_step "Merge them: pacdiff"
 }
 
 check_firmware() {
-    print_section "Checking for firmware updates with fwupd"
-    fwupdmgr refresh
-    fwupdmgr get-updates || echo "No firmware updates available."
+    section "Firmware"
+    run_quiet "Firmware metadata refreshed" fwupdmgr refresh || true
+    local fw
+    if fw=$(fwupdmgr get-updates 2>/dev/null) && [[ -n "$fw" ]]; then
+        note "Firmware updates available:"
+        echo "$fw"
+        summary_add "firmware updates available"
+        next_step "Apply firmware updates: fwupdmgr update"
+    else
+        ok "No firmware updates available."
+    fi
 }
 
 manage_kernels() {
-    print_section "Kernel Management"
+    section "Kernel management"
 
     # Display currently installed kernels
     echo "Currently installed kernels:"
@@ -567,20 +605,20 @@ manage_kernels() {
 # (aur_query_rpc + aur_fetch_bad_* live in lib/aur-common.sh, sourced above.)
 
 aur_audit() {
-    print_section "AUR audit: metrics + maintainer-change detection..."
+    section "AUR audit"
 
     if ! command -v jq >/dev/null 2>&1; then
-        echo "jq is required for the AUR audit. Install with: pacman -S jq"
+        err "jq is required for the AUR audit. Install with: pacman -S jq"
         return 1
     fi
 
     local foreign
     foreign=$(get_foreign_filtered)
     if [[ -z "$foreign" ]]; then
-        echo "No foreign (AUR) packages installed (after EXCLUDE_ALIEN)."
+        ok "No foreign (AUR) packages installed (after EXCLUDE_ALIEN)."
         return 0
     fi
-    ((${#EXCLUDE_ALIEN[@]})) && echo "(EXCLUDE_ALIEN active: ${EXCLUDE_ALIEN[*]})"
+    ((${#EXCLUDE_ALIEN[@]})) && note "EXCLUDE_ALIEN active: ${EXCLUDE_ALIEN[*]}"
 
     mkdir -p "$AUR_STATE_DIR"
     local report="$USER_HOME/aur-audit.txt"
@@ -591,8 +629,8 @@ aur_audit() {
     results=$(aur_query_rpc $foreign | jq -c '.results // []')
 
     if [[ "$results" == "[]" ]]; then
-        echo "AUR RPC returned no data (network issue or all packages gone from AUR)."
-        echo "  - check connectivity, or investigate that none resolve in the AUR."
+        err "AUR RPC returned no data (network issue or all packages gone from AUR)."
+        note "check connectivity, or investigate that none resolve in the AUR."
         return 1
     fi
 
@@ -678,42 +716,43 @@ aur_audit() {
     chown "$SUDO_USER:$SUDO_USER" "$report" 2>/dev/null || true
 
     echo ""
-    echo "Full report saved to $report"
+    note "Full report saved to $report"
+    summary_add "AUR audit written to $report"
 }
 
 aur_scan() {
-    print_section "AUR supply-chain scan (live IOCs)..."
+    section "AUR supply-chain scan"
 
     local foreign
     foreign=$(get_foreign_filtered)
     if [[ -z "$foreign" ]]; then
-        echo "No foreign (AUR) packages installed (after EXCLUDE_ALIEN)."
+        ok "No foreign (AUR) packages installed (after EXCLUDE_ALIEN)."
         return 0
     fi
-    ((${#EXCLUDE_ALIEN[@]})) && echo "(EXCLUDE_ALIEN active: ${EXCLUDE_ALIEN[*]})"
+    ((${#EXCLUDE_ALIEN[@]})) && note "EXCLUDE_ALIEN active: ${EXCLUDE_ALIEN[*]}"
 
     local findings=0
 
     # --- 1. Installed packages vs. known-malicious package list ----------------
-    echo "[*] Checking installed AUR packages against malicious-package lists..."
+    note "Checking installed AUR packages against malicious-package lists..."
     local bad_pkgs
     bad_pkgs=$(aur_fetch_bad_packages)
     if [[ -z "$bad_pkgs" ]]; then
-        echo "    WARNING: could not fetch malicious-package lists (offline?)."
-        echo "    Coverage this run is degraded; only npm-cache seed checks apply."
+        warn "could not fetch malicious-package lists (offline?)."
+        note "Coverage this run is degraded; only npm-cache seed checks apply."
     else
-        echo "    Loaded $(echo "$bad_pkgs" | wc -l) known-malicious package names."
+        note "Loaded $(echo "$bad_pkgs" | wc -l) known-malicious package names."
         local hit
         while IFS= read -r fp; do
             if grep -qxF "$fp" <<<"$bad_pkgs"; then
-                echo "    !!! COMPROMISED PACKAGE INSTALLED: $fp"
+                alert "COMPROMISED PACKAGE INSTALLED: $fp"
                 findings=$((findings + 1))
             fi
         done <<<"$foreign"
     fi
 
     # --- 2. npm/bun/yarn/pnpm caches for the injected dependency names ---------
-    echo "[*] Scanning JS package caches for injected dependencies..."
+    note "Scanning JS package caches for injected dependencies..."
     local bad_npm
     bad_npm=$(aur_fetch_bad_npm)
     [[ -z "$bad_npm" ]] && bad_npm=$(printf '%s\n' "${AUR_SEED_BAD_NPM[@]}")
@@ -727,14 +766,14 @@ aur_scan() {
         for d in "${cache_dirs[@]}"; do
             [[ -d "$d" ]] || continue
             if find "$d" -maxdepth 6 -iname "*${nm}*" 2>/dev/null | grep -q .; then
-                echo "    !!! MALICIOUS JS PACKAGE TRACE: '$nm' under $d"
+                alert "MALICIOUS JS PACKAGE TRACE: '$nm' under $d"
                 findings=$((findings + 1))
             fi
         done
     done <<<"$bad_npm"
 
     # --- 3. Suspicious build logic in cached PKGBUILDs / .install hooks --------
-    echo "[*] Scanning cached PKGBUILDs / install hooks for risky build logic..."
+    note "Scanning cached PKGBUILDs / install hooks for risky build logic..."
     local pkgbuild_roots=(
         "$USER_HOME/.cache/yay" "$USER_HOME/.cache/paru"
         "$USER_HOME/.cache/pamac" "/var/tmp/pamac-build-$SUDO_USER"
@@ -748,22 +787,22 @@ aur_scan() {
             "$root" 2>/dev/null \
             --include='PKGBUILD' --include='*.install' --include='*.sh' || true)
         if [[ -n "$matches" ]]; then
-            echo "    Review these build files (network-fetch or JS-install logic):"
+            warn "Review these build files (network-fetch or JS-install logic):"
             echo "$matches" | sed 's/^/      /'
             findings=$((findings + 1))
         fi
     done
 
     # --- 4. Host persistence / rootkit indicators (Atomic Arch payload) --------
-    echo "[*] Checking host for persistence / rootkit indicators..."
+    note "Checking host for persistence / rootkit indicators..."
     # eBPF rootkit hidden maps
     if ls /sys/fs/bpf/hidden_* >/dev/null 2>&1; then
-        echo "    !!! eBPF hidden map present: /sys/fs/bpf/hidden_*"
+        alert "eBPF hidden map present: /sys/fs/bpf/hidden_*"
         findings=$((findings + 1))
     fi
     # Trojaned sudo shim in user PATH (not pacman-owned)
     if [[ -e "$USER_HOME/.local/bin/sudo" ]]; then
-        echo "    !!! Suspicious '$USER_HOME/.local/bin/sudo' shim present (PATH hijack)."
+        alert "Suspicious '$USER_HOME/.local/bin/sudo' shim present (PATH hijack)."
         findings=$((findings + 1))
     fi
     # systemd units matching the payload's restart signature
@@ -771,17 +810,18 @@ aur_scan() {
     unit_hits=$(grep -rlE 'Restart=always' /etc/systemd/system "$USER_HOME/.config/systemd/user" 2>/dev/null \
         | xargs -r grep -lE 'RestartSec=30' 2>/dev/null || true)
     if [[ -n "$unit_hits" ]]; then
-        echo "    Review systemd units (Restart=always + RestartSec=30 - payload signature):"
+        warn "Review systemd units (Restart=always + RestartSec=30 - payload signature):"
         echo "$unit_hits" | sed 's/^/      /'
         findings=$((findings + 1))
     fi
 
     echo ""
     if (( findings == 0 )); then
-        echo "Scan complete: no indicators matched."
-        echo "(A clean result is not a guarantee - lists cover known campaigns only.)"
+        ok "Scan complete: no indicators matched."
+        note "(A clean result is not a guarantee - lists cover known campaigns only.)"
     else
-        echo "Scan complete: $findings indicator group(s) flagged above - INVESTIGATE."
+        warn "Scan complete: $findings indicator group(s) flagged above - INVESTIGATE."
+        summary_add "$findings AUR scan indicator(s) flagged — INVESTIGATE"
     fi
 }
 
@@ -792,6 +832,19 @@ aur_scan() {
 main() {
     # Keep the yay tripwire allowlist in sync with the config (cheap, always).
     sync_lua_allowlist
+
+    # Count the actions that will run so section() can show [n/total] progress.
+    STEP_TOTAL=0; STEP_CUR=0
+    { $RUN_ALL || $DO_CLEAN; }          && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    { $RUN_ALL || $DO_ORPHANS; }        && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    { $RUN_ALL || $DO_UPDATE; }         && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    { $RUN_ALL || $DO_REBUILDS; }       && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    { $RUN_ALL || $DO_PYTHON_REBUILD; } && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    { $RUN_ALL || $DO_PACNEW; }         && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    { $RUN_ALL || $DO_FIRMWARE; }       && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    $DO_AUR_AUDIT && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    $DO_AUR_SCAN  && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
+    $DO_KERNEL    && STEP_TOTAL=$((STEP_TOTAL + 1)) || true
 
     if $RUN_ALL || $DO_CLEAN; then
         clean_caches
@@ -836,6 +889,8 @@ main() {
     if $DO_KERNEL; then
         manage_kernels
     fi
+
+    print_summary
 }
 
 # =============================================================================
@@ -923,6 +978,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         -R|--auto-rebuild)
             AUTO_REBUILD=true
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        -q|--quiet)
+            QUIET=true
+            shift
+            ;;
+        --no-color)
+            UPDATE_NO_COLOR=1; output_setup_colors
             shift
             ;;
         # Config-control flags (already handled by the pre-scan above).

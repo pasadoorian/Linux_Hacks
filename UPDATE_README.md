@@ -139,6 +139,20 @@ not actions, so on their own the `DEFAULT_ACTIONS` set still runs.
 | `--no-config` | Ignore the config file entirely; use built-in defaults |
 | `--print-config` | Print the **effective** settings (defaults + config + CLI) and exit |
 
+### Output flags
+
+The script prints clean, sectioned output: each action gets a `▸ [n/total]
+Title` header, status lines (`✓`/`!`/`✗`), and a final **Summary** with
+suggested next steps. Noisy sub-commands (cache/mirror/firmware) are collapsed to
+a one-line status by default. Color is automatic on an interactive terminal and
+off when piped, when `NO_COLOR` is set, or with `--no-color`.
+
+| Flag | Effect |
+|------|--------|
+| `-v`, `--verbose` | Show full output from the cache/mirror/firmware sub-commands |
+| `-q`, `--quiet` | Only warnings and errors (suppress headers, status, summary) |
+| `--no-color` | Disable colored output (also honored: `NO_COLOR`, `TERM=dumb`) |
+
 ---
 
 ## The yay updater (default) and why it beats pamac for AUR

@@ -42,6 +42,12 @@ tests/
 emulates the AUR RPC and the IOC lists). The lua tests stub the `yay` global to
 capture both hook callbacks and all `yay.log` output.
 
+Output/UX behavior (the shared `lib/output.sh`: sectioned headers, `[n/total]`
+step counters, the run summary, `--quiet`, `--no-color`, and `run_quiet`) is
+covered by `unit/test_output.bats`. Because tests capture output with no TTY,
+color is automatically disabled; assert on the plain text (and force
+`UPDATE_NO_COLOR=1` if you ever need to be explicit).
+
 ## How it works
 
 ### bats (bash)
