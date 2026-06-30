@@ -18,19 +18,20 @@ the June 2026 **"Atomic Arch"** AUR compromise.
 1. [Quick start](#quick-start)
 2. [Requirements](#requirements)
 3. [All options](#all-options)
-4. [Modifiers](#modifiers)
-5. [The yay updater (default) and why it beats pamac for AUR](#the-yay-updater-default-and-why-it-beats-pamac-for-aur)
-6. [AUR audit (`-A`) — reading the metrics table](#aur-audit--a--reading-the-metrics-table)
+4. [Concepts (foreign vs. orphaned, rebuild vs. python rebuild)](#concepts)
+5. [Modifiers](#modifiers)
+6. [The yay updater (default) and why it beats pamac for AUR](#the-yay-updater-default-and-why-it-beats-pamac-for-aur)
+7. [AUR audit (`-A`) — reading the metrics table](#aur-audit--a--reading-the-metrics-table)
    - [Column-by-column](#column-by-column)
    - [FLAGS reference](#flags-reference)
    - [Special report lines](#special-report-lines)
    - [Maintainer-change / re-adoption detection](#maintainer-change--re-adoption-detection)
-7. [AUR scan (`-S`) — malware IOC checks](#aur-scan--s--malware-ioc-checks)
-8. [Install-time warnings (the yay hooks)](#install-time-warnings-the-yay-hooks)
-9. [Background: the Atomic Arch attack](#background-the-atomic-arch-attack)
-10. [Recommended workflows](#recommended-workflows)
-11. [Configuration](#configuration)
-12. [Safety notes & caveats](#safety-notes--caveats)
+8. [AUR scan (`-S`) — malware IOC checks](#aur-scan--s--malware-ioc-checks)
+9. [Install-time warnings (the yay hooks)](#install-time-warnings-the-yay-hooks)
+10. [Background: the Atomic Arch attack](#background-the-atomic-arch-attack)
+11. [Recommended workflows](#recommended-workflows)
+12. [Configuration](#configuration)
+13. [Safety notes & caveats](#safety-notes--caveats)
 
 ---
 
@@ -79,10 +80,10 @@ matches the old `--all` behavior — see [Configuration](#configuration)).
 | Flag | Long form | Action |
 |------|-----------|--------|
 | `-c` | `--clean` | Clean pacman/pamac/yay/paru caches and stale db locks |
-| `-o` | `--orphans` | Save foreign-package list to `~/alien-pkgs.txt` (minus `EXCLUDE_ALIEN`), then prompt before removing each orphan (skipping `KEEP_ORPHANS`) |
+| `-o` | `--orphans` | Inventory **foreign** (AUR/manual) packages to `~/alien-pkgs.txt` for review, then prompt to remove **orphaned** deps. Two different concepts — see [Foreign vs. orphaned](#foreign-vs-orphaned-packages) |
 | `-u` | `--update` | Full system update (**yay by default**: pacman repos + yay AUR; see modifiers) |
-| `-r` | `--rebuilds` | List packages needing rebuild (`checkrebuild`); rebuild with `-R` |
-| `-y` | `--python-rebuild` | Find packages built against an old Python; rebuild with `-R` |
+| `-r` | `--rebuilds` | Find packages broken by a **library/ABI change** (`checkrebuild`); rebuild with `-R`. See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
+| `-y` | `--python-rebuild` | Find packages stranded by a **Python interpreter version bump**; rebuild with `-R`. See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
 | `-p` | `--pacnew` | Show `.pacnew` files needing a merge (`pacdiff -o`) |
 | `-f` | `--firmware` | Refresh & list firmware updates (`fwupdmgr`) |
 | `-k` | `--kernel` | Interactive kernel install/remove (`mhwd-kernel`) |
@@ -110,6 +111,54 @@ It deliberately **excludes**:
 > yay's diff/edit review menus, so you see and approve every PKGBUILD change
 > before it builds. Use `-P` (pacman-only) for a fully non-interactive,
 > repos-only update.
+
+---
+
+## Concepts
+
+`-o` and the two rebuild checks each bundle a pair of ideas that are easy to
+confuse. This section explains them once.
+
+### Foreign vs. orphaned packages
+
+These are **orthogonal** — `-o` happens to do both, which is why they get mixed up:
+
+| | Foreign | Orphaned |
+|---|---------|----------|
+| **Question** | *Where did it come from?* | *Why is it still here?* |
+| **Definition** | Installed but **not in any sync database** (`pacman -Qm`) | Installed **as a dependency** that **nothing requires anymore** (`pacman -Qtdq`) |
+| **In practice** | Your **AUR builds** and manual `pacman -U` installs | Leftover dependency cruft after something was removed |
+| **What `-o` does** | **Lists** them to `~/alien-pkgs.txt` (never auto-removed) | **Offers to remove** them (skipping `KEEP_ORPHANS`, prompting per item) |
+
+A package can be either, both, or neither: a repo library installed as a dep and
+now unneeded is **orphaned but not foreign**; an AUR app you chose to install is
+**foreign but not orphaned**.
+
+**What review does the foreign list need?** `~/alien-pkgs.txt` is your *inventory*
+of packages that get **no official-repo updates** and carry AUR supply-chain
+risk. For each entry decide:
+
+1. **Do I still use it?** Remove what you don't: `yay -Rns <pkg>` (or `pacman -Rns`).
+2. **Is it still safe/healthy?** That's exactly what `-A` and `-S` automate —
+   `-A` flags orphaned-in-AUR / out-of-date / maintainer changes, `-S` checks the
+   live compromised-package lists. So: `alien-pkgs.txt` is the inventory, **`-A`/`-S`
+   are the vetting.** Excluded entries (vetted-and-trusted) go in `EXCLUDE_ALIEN`.
+
+### Rebuild (`-r`) vs. Python rebuild (`-y`)
+
+Both find packages that need rebuilding, but for **different kinds of breakage**:
+
+| | `-r` rebuild check | `-y` Python rebuild check |
+|---|--------------------|---------------------------|
+| **Trigger** | A shared library's **soname/ABI changed** (e.g. `libfoo.so.1` → `.so.2`) | The **Python interpreter** bumped (e.g. 3.11 → 3.13) |
+| **How** | `checkrebuild` (rebuild-detector): finds packages **linking a `.so` that changed or vanished** | Finds packages **owning files under a stale `/usr/lib/python3.OLD/`** dir (`pacman -Qoq`) |
+| **Catches** | Any native/compiled package with a broken library link | Packages stranded in the old Python dir |
+
+Why both? They **overlap but neither subsumes the other.** Compiled Python
+extensions (linking `libpython3.X.so`) appear in *both*. But **pure-Python**
+packages just drop `.py` files into the versioned dir — no broken `.so`, so
+`checkrebuild` misses them; `-y` catches those by directory ownership. Both
+honor `-R`/`--auto-rebuild` to actually rebuild (via `pamac build`).
 
 ---
 

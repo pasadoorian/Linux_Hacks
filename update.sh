@@ -293,6 +293,12 @@ clean_caches() {
     summary_add "caches cleaned"
 }
 
+# Two orthogonal checks in one section:
+#   FOREIGN  = installed but not in any sync DB (pacman -Qm) -> AUR/manual installs.
+#              Listed to ~/alien-pkgs.txt for review; never auto-removed. Vet them
+#              with -A/-S; exclude vetted ones via EXCLUDE_ALIEN.
+#   ORPHANED = installed as a dependency, now required by nothing (pacman -Qtdq).
+#              Offered for removal (skipping KEEP_ORPHANS, prompting per item).
 check_foreign_orphans() {
     section "Foreign & orphaned packages"
 
@@ -309,7 +315,7 @@ check_foreign_orphans() {
         echo "$line" >> "$USER_HOME/alien-pkgs.txt"
     done < <(pacman -Qm 2>/dev/null || true)
     chown "$SUDO_USER:$SUDO_USER" "$USER_HOME/alien-pkgs.txt" 2>/dev/null || true
-    note "Foreign packages saved to $USER_HOME/alien-pkgs.txt for review"
+    note "Foreign (AUR/manual) packages saved to $USER_HOME/alien-pkgs.txt for review (vet with -A/-S)"
     (( excluded > 0 )) && note "$excluded foreign package(s) suppressed by EXCLUDE_ALIEN"
 
     # --- Orphans: protect KEEP_ORPHANS, then confirm each remaining removal ---
@@ -401,6 +407,9 @@ perform_update() {
     esac
 }
 
+# Library/ABI rebuild check: checkrebuild (rebuild-detector) finds packages that
+# link a shared library (.so) which changed or vanished -- the general soname-bump
+# case. Complemented by check_python_rebuilds for the Python-interpreter case.
 check_rebuilds() {
     section "Rebuild check"
 
@@ -441,6 +450,10 @@ check_rebuilds() {
     fi
 }
 
+# Python-version rebuild check: after the interpreter bumps (e.g. 3.11 -> 3.13),
+# find packages still owning files under a stale /usr/lib/python3.OLD dir
+# (pacman -Qoq). Catches pure-Python packages that checkrebuild (-r) misses
+# because they have no broken .so link.
 check_python_rebuilds() {
     section "Python rebuild check"
 
