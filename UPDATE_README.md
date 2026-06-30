@@ -59,16 +59,21 @@ upgrade. The audit/scan are read-only and never build anything.
 
 | Tool | Used for | Install |
 |------|----------|---------|
-| `pacman`, `pamac` | base package management | (stock Manjaro) |
-| `yay` (v13+) | **default** AUR update backend; PKGBUILD timestamps & Lua hooks | `pamac build yay` |
+| `pacman` | base package management | (every Arch-based distro) |
+| `yay` (v13+) | **default** AUR updater; PKGBUILD timestamps & Lua hooks | `pamac build yay` (Manjaro) / AUR (Arch) |
 | `curl` | AUR RPC queries + fetching live IOC lists | `pacman -S curl` |
 | `jq` | parsing AUR RPC JSON & IOC data | `pacman -S jq` |
-| `checkrebuild` (pacman-contrib / rebuild-detector) | `-r` rebuild detection | `pacman -S rebuild-detector` |
+| `checkrebuild` (rebuild-detector) | `-r` rebuild detection | `pacman -S rebuild-detector` |
+| `pacdiff` (pacman-contrib) | `-p` pacnew handling | `pacman -S pacman-contrib` |
 | `fwupd` | `-f` firmware | `pacman -S fwupd` |
-| `mhwd-kernel` | `-k` kernel mgmt | (stock Manjaro) |
+| `pamac` | `-c` cache clean; optional `pamac` updater | (stock Manjaro; `pamac-aur` on Arch) — optional, degrades if absent |
+| `pacman-mirrors` | mirror refresh during `-u` | (stock Manjaro; Arch uses `reflector`) — optional |
+| `mhwd-kernel` | `-k` kernel mgmt | (stock Manjaro) — **Manjaro-only feature** |
 
 The `-A` audit and `-S` scan require **`curl` + `jq`** and an internet connection
-(they query the AUR RPC and fetch the latest malicious-package lists live).
+(they query the AUR RPC and fetch the latest malicious-package lists live). The
+core workflow runs on any Arch-based distro; the Manjaro-only helpers above are
+optional (see the [Installation distro note](#installation)).
 
 ---
 
@@ -87,15 +92,33 @@ cd ~/src/linux_hacks
 ### 2. Install dependencies
 
 ```bash
-# Core tools (run as root):
+# Core tools (run as root) — available on any Arch-based distro:
 sudo pacman -S --needed git curl jq base-devel rebuild-detector pacman-contrib fwupd
-# yay v13+ — the default AUR updater and what the install-time hooks run on:
+```
+
+Then install **yay v13+** (the default AUR updater and what the install-time
+hooks run on):
+
+```bash
+# Manjaro:
 pamac build yay
+# Arch / other Arch-based distros (build from the AUR):
+git clone https://aur.archlinux.org/yay.git && (cd yay && makepkg -si)
 ```
 
 `rebuild-detector` provides `checkrebuild` (`-r`); `pacman-contrib` provides
-`pacdiff` (`-p`); `base-devel` is needed to build AUR packages. `pacman`,
-`pamac`, `pacman-mirrors`, and `mhwd-kernel` ship with Manjaro.
+`pacdiff` (`-p`); `base-devel` is needed to build AUR packages.
+
+> **Distro note.** The default workflow — `-u` (pacman repos + yay AUR), plus
+> `-A`/`-S`/`aur-precheck.sh` — runs on **any Arch-based distro**. A few helpers
+> are **Manjaro-specific** and used only by certain features; the script **degrades
+> gracefully** (with a harmless warning) if they're absent:
+>
+> | Tool | Manjaro-only feature | On plain Arch |
+> |------|----------------------|---------------|
+> | `pamac` | `-c` cache cleaning; the optional `pamac` updater | install `pamac-aur` from the AUR, or skip — `-c` still runs `pacman -Scc` |
+> | `pacman-mirrors` | mirror refresh during `-u` | use `reflector` instead; the refresh step is skipped if absent |
+> | `mhwd-kernel` | `-k` kernel management | not available — `-k` is Manjaro-only |
 
 ### 3. Make it runnable
 
