@@ -264,8 +264,11 @@ clean_caches() {
     # Clear pacman cache (all uninstalled packages)
     pacman -Scc --noconfirm
 
-    # Clear pamac cache
-    pamac clean --no-confirm
+    # Clear pamac cache as the real user. pamac's AUR database is per-user, so
+    # running it as root (this script auto-elevates) triggers a spurious
+    # "Failed to synchronize AUR database" warning. '|| true' keeps a clean
+    # hiccup from aborting the run under 'set -e'.
+    sudo -u "$SUDO_USER" pamac clean --no-confirm || true
 
     # Clear AUR/pamac build caches
     rm -rf "$USER_HOME/.cache/pamac"
