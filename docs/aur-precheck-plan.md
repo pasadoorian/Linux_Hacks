@@ -1,6 +1,31 @@
 # Plan: RPC-backed install-time AUR warnings
 
-**Status:** planned, not started (saved 2026-06-30).
+**Status:** M0 (spike) COMPLETE 2026-06-30; M1–M5 not started.
+
+## M0 results (2026-06-30) — spike findings
+
+Verified empirically on the live system (yay v13.0.1, sandboxed config):
+
+- **yay DOES support Lua hooks** (`man yay`; binary embeds `github.com/yuin/gopher-lua v1.1.2`). API docs ship at `/usr/share/doc/yay/lua.md` with examples in `/usr/share/doc/yay/examples/` — including `recently_modified.lua` and `maintainer_change.lua`, our exact use cases.
+- **Runtime is Lua 5.1 with the full stdlib.** `init.lua` loads even on `yay --version`. Confirmed working in yay's interpreter: `os.execute` (exit 0), **`io.popen` (captured output OK)**, and temp-file write+readback. So shelling out to `curl`/a helper is fine — the earlier "gopher-lua is sandboxed, can't curl" worry was WRONG. Proper output channels: `yay.log.warn/error`; `yay.abort("msg")` can hard-stop.
+- **Most signals need NO network**, because yay passes metadata in the event:
+  - `AURPreInstall` event provides `last_modified`, `pkgbuild`, `srcinfo`, `installed`, `packages[]` — but NOT maintainer/votes/out-of-date. (Fires per base for `-S` and `-Syu`, before menus/build.)
+  - `UpgradeSelect` event (during `-Syu`, before the exclude menu) provides per-package `maintainer` AND `last_modified`, and the hook can RETURN an exclude list (soft-block).
+  - `SearchFilter` event provides votes/popularity/first_submitted/last_modified (search time only).
+
+### Revised approach (supersedes the single-hook plan below)
+Split into TWO hooks; RPC becomes a small fallback, not the backbone:
+- **`UpgradeSelect` hook** — covers the bulk `update.sh -u` (`yay -Syu`) path with ZERO RPC: flag stale (`last_modified`), orphan (`maintainer==""`), maintainer-change (cache, like the shipped example), and cross-ref name+maintainer against cached IOC lists. Can pre-exclude compromised packages.
+- **`AURPreInstall` hook** — covers ad-hoc `yay -S pkg`: keep the existing PKGBUILD/`.install` build-logic scan, add stale check from `last_modified`, and for orphan/out-of-date/malicious-maintainer (absent from this event) do ONE RPC call via the shared helper (`io.popen`). Few packages here, so latency is fine.
+- Shared bash helper still useful for the AURPreInstall RPC enrichment + IOC cross-ref, and stays unit-testable. IOC lists cached with TTL.
+
+This removes most of the per-package RPC latency concern. The milestones below
+still hold structurally; M2/M3 now also cover the `UpgradeSelect` hook, and the
+RPC helper's role shrinks to the ad-hoc-install fallback.
+
+---
+
+**Original plan (pre-M0):** saved 2026-06-30.
 **Goal:** when installing/upgrading an AUR package, warn (advisory, never block)
 if it is **orphaned**, **out-of-date**, **stale** (not updated in N days), or on
 the **live compromised accounts/packages lists** — in addition to the existing
