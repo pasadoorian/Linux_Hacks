@@ -57,25 +57,25 @@ teardown() { teardown_update_env; }
     refute_line --partial "pamac build"
 }
 
-@test "rebuild_packages uses 'yay -S --rebuild' with review under the yay backend" {
-    UPDATER=yay
+@test "rebuild_packages uses 'yay -S --rebuild' with review when AUR_UPDATER=yay" {
+    AUR_UPDATER=yay
     run rebuild_packages libfoo libbar
     assert stub_called "yay -S --rebuild"
     assert stub_called "--diffmenu=true"
     assert stub_called "libfoo"
 }
 
-@test "rebuild_packages uses 'pamac build' under the pamac backend" {
-    UPDATER=pamac
+@test "rebuild_packages uses 'pamac build' when AUR_UPDATER=pamac" {
+    AUR_UPDATER=pamac
     run rebuild_packages libfoo
     assert stub_called "pamac build libfoo"
 }
 
-@test "rebuild_packages refuses under the pacman backend (no AUR support)" {
-    UPDATER=pacman
+@test "rebuild_packages refuses when AUR_UPDATER=none" {
+    AUR_UPDATER=none
     run rebuild_packages libfoo
     assert_failure
-    assert_output --partial "Cannot rebuild AUR packages with the pacman backend"
+    assert_output --partial "Cannot rebuild AUR packages: AUR updater is 'none'"
 }
 
 @test "check_rebuilds reports nothing to do on empty output" {

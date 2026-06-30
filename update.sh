@@ -26,9 +26,13 @@ DO_AUR_SCAN=false
 RUN_ALL=false
 
 # Modifier flags
-# UPDATER selects the -u backend: "yay" (default, repos via pacman + AUR via yay),
-# "pacman" (official repos only), or "pamac" (repos + AUR via pamac).
-UPDATER="yay"
+# The -u update is two independent steps, each with its own tool:
+#   SYSTEM_UPDATER -- official repos: "pacman" (default) or "pamac"
+#   AUR_UPDATER    -- AUR packages:   "yay" (default), "pamac", or "none"
+# Override per-run with --system-updater / --aur-updater. (Choosing "pamac" as the
+# AUR updater means pamac manages repos too -- it is an all-in-one tool.)
+SYSTEM_UPDATER="pacman"
+AUR_UPDATER="yay"
 AUTO_REBUILD=false
 
 # =============================================================================
@@ -167,7 +171,8 @@ print_config() {
     echo "Effective configuration"
     echo "----------------------------------------------"
     printf '  %-18s %s\n' "config file"      "$($NO_CONFIG && echo "(skipped: --no-config)" || echo "$CONFIG_FILE")"
-    printf '  %-18s %s\n' "UPDATER"          "$UPDATER"
+    printf '  %-18s %s%s\n' "System updater"  "$SYSTEM_UPDATER" "$([[ $SYSTEM_UPDATER == pacman ]] && echo '   [default]')"
+    printf '  %-18s %s%s\n' "AUR updater"     "$AUR_UPDATER"    "$([[ $AUR_UPDATER == yay ]] && echo '   [default]')"
     printf '  %-18s %s\n' "AUTO_REBUILD"     "$AUTO_REBUILD"
     printf '  %-18s %s\n' "AUR_RECENT_DAYS"  "$AUR_RECENT_DAYS"
     printf '  %-18s %s\n' "DEFAULT_ACTIONS"  "${DEFAULT_ACTIONS[*]:-(none)}"
@@ -210,8 +215,8 @@ Manjaro Linux system update and maintenance script.
 Options:
   -c, --clean          Clean package and build caches
   -o, --orphans        Check foreign packages and remove orphans
-  -u, --update         Perform full system update (repos via pacman + AUR via yay
-                       by default; override with -P pacman-only or -m pamac)
+  -u, --update         Update official repos (via SYSTEM_UPDATER) then AUR (via
+                       AUR_UPDATER). Defaults: repos=pacman, AUR=yay.
   -r, --rebuilds       List packages that need rebuilding
   -y, --python-rebuild Check Python packages needing rebuild after version upgrade
   -p, --pacnew         List pacnew files needing attention
@@ -227,11 +232,12 @@ Options:
                        excludes -k, -A, and -S)
   -h, --help           Show this help message
 
-Modifiers (select the -u backend; default is yay):
-  -Y, --yay          Repos via pacman + AUR via yay, review-enabled (DEFAULT)
-  -P, --pacman       Official repos only via pacman (no AUR)
-  -m, --pamac        Repos + AUR via pamac (the old default)
-  -R, --auto-rebuild Rebuild packages with outdated dependencies (with confirmation)
+Updater selection (override the config for this run):
+      --system-updater TOOL   Official repos via: pacman (default) | pamac
+      --aur-updater TOOL      AUR via: yay (default) | pamac | none
+                              (yay = with PKGBUILD review + supply-chain hooks;
+                               pamac also manages repos; none skips AUR)
+  -R, --auto-rebuild          Rebuild packages with outdated deps (with confirmation)
 
 Output:
   -v, --verbose      Show full output from cache/mirror/firmware sub-commands
@@ -246,10 +252,11 @@ Configuration (see update.conf.example):
 Examples:
   $(basename "$0")           # Run all actions; AUR updated via yay (with review)
   $(basename "$0") -a        # Run all actions (explicit)
-  $(basename "$0") -c -u     # Clean caches and update only (yay for AUR)
+  $(basename "$0") -c -u     # Clean caches and update only (repos: pacman, AUR: yay)
   $(basename "$0") --clean   # Clean caches only
-  $(basename "$0") -u -P     # Update official repos only (pacman, no AUR)
-  $(basename "$0") -u -m     # Update via pamac instead of yay
+  $(basename "$0") -u --aur-updater none   # Update official repos only (no AUR)
+  $(basename "$0") -u --aur-updater pamac  # Update repos + AUR via pamac
+  $(basename "$0") -u --system-updater pamac  # Use pamac for repos, yay for AUR
   $(basename "$0") -A        # Audit AUR packages (metrics + maintainer changes)
   $(basename "$0") -S        # Scan AUR packages against live malware IOCs
   $(basename "$0") -A -S     # Audit then scan (recommended before any AUR upgrade)
@@ -370,39 +377,50 @@ perform_update() {
     # Refresh the mirrors list and select the fastest ones
     run_quiet "Mirrors refreshed" pacman-mirrors -f || true
 
-    case "$UPDATER" in
-        yay)
-            # DEFAULT. Official repos via pacman (run as root), then AUR via yay
-            # as the original user. yay v13 surfaces PKGBUILD last-modified
-            # timestamps and honors ~/.config/yay/init.lua hooks; the diff/edit
-            # menus force a review of every PKGBUILD/diff before anything builds.
-            # AUR builds must NOT run as root, hence sudo -u "$SUDO_USER".
-            if ! command -v yay >/dev/null 2>&1; then
-                err "yay not found. Install with: pamac build yay"
-                note "(or use -P for pacman-only, or -m for pamac)"
-                return 1
-            fi
-            note "Refreshing official repos with pacman..."
-            pacman -Syuu --noconfirm
-            echo ""
-            note "Updating AUR packages with yay (PKGBUILD review enabled)..."
-            sudo -u "$SUDO_USER" yay -Syu --aur --devel \
-                --combinedupgrade --cleanafter \
-                --answerdiff None --answeredit None --diffmenu=true --editmenu=true
-            summary_add "packages updated (yay: repos + AUR)"
-            next_step "Check AUR packages before the next build: $(basename "$0") -A -S"
-            ;;
+    # pamac is an all-in-one tool: if it's the AUR updater it also drives the repos
+    # (there is no clean "AUR only" pamac mode), so it does both in one pass.
+    if [[ "$AUR_UPDATER" == pamac ]]; then
+        [[ "$SYSTEM_UPDATER" != pamac ]] && \
+            note "AUR updater is pamac, which manages repos too — using pamac for both."
+        note "Updating repos + AUR via pamac..."
+        sudo -u "$SUDO_USER" pamac update -a --enable-downgrade --force-refresh
+        summary_add "packages updated (pamac: repos + AUR)"
+        return 0
+    fi
+
+    # --- Official repos ---
+    case "$SYSTEM_UPDATER" in
         pacman)
-            # Official repos only (no AUR)
-            note "Updating official repos only (pacman, no AUR)..."
-            pacman -Syuu
-            summary_add "packages updated (pacman, repos only)"
+            note "Updating official repos (pacman)..."
+            pacman -Syuu --noconfirm
             ;;
         pamac)
-            # Update using pamac as original user (AUR requires non-root)
-            note "Updating via pamac..."
-            sudo -u "$SUDO_USER" pamac update -a --enable-downgrade --force-refresh
-            summary_add "packages updated (pamac)"
+            note "Updating official repos (pamac)..."
+            sudo -u "$SUDO_USER" pamac update --enable-downgrade --force-refresh
+            ;;
+    esac
+
+    # --- AUR ---
+    case "$AUR_UPDATER" in
+        yay)
+            # AUR builds must NOT run as root (sudo -u "$SUDO_USER"). -Sua upgrades
+            # AUR packages only (repos already done above). The diff/edit menus
+            # force review and honor ~/.config/yay/init.lua hooks before any build.
+            if ! command -v yay >/dev/null 2>&1; then
+                err "yay not found (AUR_UPDATER=yay). Install with: pamac build yay"
+                note "Or set --aur-updater pamac (or none)."
+                return 1
+            fi
+            echo ""
+            note "Updating AUR packages (yay, with PKGBUILD review)..."
+            sudo -u "$SUDO_USER" yay -Sua --devel --cleanafter \
+                --answerdiff None --answeredit None --diffmenu=true --editmenu=true
+            summary_add "packages updated (repos: $SYSTEM_UPDATER, AUR: yay)"
+            next_step "Check AUR packages before the next build: $(basename "$0") -A -S"
+            ;;
+        none)
+            note "Skipping AUR (AUR updater: none)."
+            summary_add "packages updated (repos only, via $SYSTEM_UPDATER)"
             ;;
     esac
 }
@@ -413,7 +431,7 @@ perform_update() {
 # yay --rebuild forces a build even when the version is unchanged (the soname /
 # checkrebuild case). pacman can't build AUR, so that backend refuses.
 rebuild_packages() {
-    case "$UPDATER" in
+    case "$AUR_UPDATER" in
         yay)
             sudo -u "$SUDO_USER" yay -S --rebuild \
                 --answerdiff None --answeredit None --diffmenu=true --editmenu=true \
@@ -422,9 +440,9 @@ rebuild_packages() {
         pamac)
             sudo -u "$SUDO_USER" pamac build "$@"
             ;;
-        pacman)
-            err "Cannot rebuild AUR packages with the pacman backend (no AUR support)."
-            note "Re-run with the yay (-Y) or pamac (-m) backend to rebuild: $*"
+        none)
+            err "Cannot rebuild AUR packages: AUR updater is 'none'."
+            note "Set --aur-updater yay (or pamac) to rebuild: $*"
             return 1
             ;;
     esac
@@ -960,6 +978,18 @@ done
 
 $NO_CONFIG || load_config
 
+# Back-compat: the old single 'UPDATER' config key is deprecated in favor of
+# SYSTEM_UPDATER + AUR_UPDATER. Map it (with a warning) if a config still sets it.
+if [[ -n "${UPDATER:-}" ]]; then
+    warn "config: 'UPDATER' is deprecated — use SYSTEM_UPDATER + AUR_UPDATER. Mapping '$UPDATER'."
+    case "$UPDATER" in
+        yay)    SYSTEM_UPDATER="pacman"; AUR_UPDATER="yay" ;;
+        pacman) SYSTEM_UPDATER="pacman"; AUR_UPDATER="none" ;;
+        pamac)  SYSTEM_UPDATER="pamac";  AUR_UPDATER="pamac" ;;
+        *)      warn "config: unknown UPDATER='$UPDATER' ignored." ;;
+    esac
+fi
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -c|--clean)
@@ -1006,17 +1036,13 @@ while [[ $# -gt 0 ]]; do
             RUN_ALL=true; ACTIONS_SPECIFIED=true
             shift
             ;;
-        -P|--pacman)
-            UPDATER="pacman"
-            shift
+        --system-updater)
+            SYSTEM_UPDATER="${2:-}"
+            shift 2
             ;;
-        -Y|--yay)
-            UPDATER="yay"
-            shift
-            ;;
-        -m|--pamac)
-            UPDATER="pamac"
-            shift
+        --aur-updater)
+            AUR_UPDATER="${2:-}"
+            shift 2
             ;;
         -R|--auto-rebuild)
             AUTO_REBUILD=true
@@ -1055,6 +1081,16 @@ done
 
 # No action named on the CLI -> fall back to the configured default set.
 $ACTIONS_SPECIFIED || apply_default_actions
+
+# Validate the updater selections (from config or CLI).
+case "$SYSTEM_UPDATER" in
+    pacman|pamac) ;;
+    *) echo "Error: SYSTEM_UPDATER must be 'pacman' or 'pamac' (got '$SYSTEM_UPDATER')" >&2; exit 1 ;;
+esac
+case "$AUR_UPDATER" in
+    yay|pamac|none) ;;
+    *) echo "Error: AUR_UPDATER must be 'yay', 'pamac', or 'none' (got '$AUR_UPDATER')" >&2; exit 1 ;;
+esac
 
 # --print-config short-circuits: show the merged settings and exit.
 if $PRINT_CONFIG; then

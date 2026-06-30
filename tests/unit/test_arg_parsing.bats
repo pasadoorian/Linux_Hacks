@@ -28,11 +28,27 @@ teardown() { teardown_update_env; }
     refute_output --partial "Updating packages"
 }
 
-@test "modifier-only invocation still runs the default actions" {
-    run bash "$REPO_ROOT/update.sh" --no-config -P
+@test "an updater flag alone still runs the default actions" {
+    run bash "$REPO_ROOT/update.sh" --no-config --aur-updater none
     assert_success
     assert_output --partial "Updating packages"
-    assert stub_called "pacman -Syuu"   # -P selected the pacman backend
+    assert stub_called "pacman -Syuu"   # repos still via pacman (default); AUR skipped
+}
+
+@test "an invalid --aur-updater value is rejected" {
+    run bash "$REPO_ROOT/update.sh" --no-config --aur-updater bogus --print-config
+    assert_failure
+    assert_output --partial "AUR_UPDATER must be"
+}
+
+@test "a legacy UPDATER config key is mapped with a deprecation warning" {
+    local cfg="$TEST_HOME/legacy.conf"
+    echo 'UPDATER=pamac' > "$cfg"
+    run bash "$REPO_ROOT/update.sh" --config "$cfg" --print-config
+    assert_success
+    assert_output --partial "deprecated"
+    assert_output --partial "System updater     pamac"
+    assert_output --partial "AUR updater        pamac"
 }
 
 @test "unknown option exits non-zero with usage" {

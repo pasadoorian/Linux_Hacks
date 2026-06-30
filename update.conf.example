@@ -35,12 +35,25 @@
 # explicit-only). You can add them here if you want them every run.
 #DEFAULT_ACTIONS=(clean orphans update rebuilds python-rebuild pacnew firmware)
 
-# UPDATER -- which backend `-u/--update` uses by default:
-#   yay    = official repos via pacman + AUR via yay, with PKGBUILD review (default)
-#   pacman = official repos only, no AUR
-#   pamac  = repos + AUR via pamac (the old default)
-# Overridden on the command line by -Y / -P / -m.
-#UPDATER="yay"
+# SYSTEM_UPDATER / AUR_UPDATER -- `-u/--update` runs TWO steps, each with its own
+# tool, so it's always clear which tool does what:
+#
+#   SYSTEM_UPDATER  -- official repositories
+#       pacman   (default)  plain pacman -Syuu
+#       pamac               pamac update
+#
+#   AUR_UPDATER     -- AUR packages
+#       yay      (default)  yay, with PKGBUILD review + the install-time
+#                           supply-chain hooks (~/.config/yay/init.lua)
+#       pamac               pamac (NOTE: pamac is all-in-one, so choosing pamac
+#                           here means pamac updates the repos too)
+#       none                skip the AUR entirely (repos-only update)
+#
+# Override per-run with `--system-updater TOOL` / `--aur-updater TOOL`.
+# (The old single `UPDATER=` key is deprecated; if still set it is mapped with a
+#  warning: yay->pacman+yay, pacman->pacman+none, pamac->pamac+pamac.)
+#SYSTEM_UPDATER="pacman"
+#AUR_UPDATER="yay"
 
 # AUTO_REBUILD -- if true, the rebuild checks (-r and -y) will offer to rebuild
 # the affected packages (after a confirmation prompt) instead of only listing

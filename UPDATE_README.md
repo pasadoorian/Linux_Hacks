@@ -82,8 +82,8 @@ matches the old `--all` behavior — see [Configuration](#configuration)).
 | `-c` | `--clean` | Clean pacman/pamac/yay/paru caches and stale db locks |
 | `-o` | `--orphans` | Inventory **foreign** (AUR/manual) packages to `~/alien-pkgs.txt` for review, then prompt to remove **orphaned** deps. Two different concepts — see [Foreign vs. orphaned](#foreign-vs-orphaned-packages) |
 | `-u` | `--update` | Full system update (**yay by default**: pacman repos + yay AUR; see modifiers) |
-| `-r` | `--rebuilds` | Find packages broken by a **library/ABI change** (`checkrebuild`); rebuild with `-R` (via the configured backend — yay by default). See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
-| `-y` | `--python-rebuild` | Find packages stranded by a **Python interpreter version bump**; rebuild with `-R` (via the configured backend). See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
+| `-r` | `--rebuilds` | Find packages broken by a **library/ABI change** (`checkrebuild`); rebuild with `-R` (via the configured `AUR_UPDATER` — yay by default). See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
+| `-y` | `--python-rebuild` | Find packages stranded by a **Python interpreter version bump**; rebuild with `-R` (via `AUR_UPDATER`). See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
 | `-p` | `--pacnew` | Show `.pacnew` files needing a merge (`pacdiff -o`) |
 | `-f` | `--firmware` | Refresh & list firmware updates (`fwupdmgr`) |
 | `-k` | `--kernel` | Interactive kernel install/remove (`mhwd-kernel`) |
@@ -106,10 +106,10 @@ It deliberately **excludes**:
   you request them by name (`-A` / `-S`) when you want them. They are read-only
   and never build anything.
 
-> **Note on the default update:** because yay is now the default `-u` backend,
+> **Note on the default update:** because the default `AUR_UPDATER` is yay,
 > a normal `--all` (or `-u`) run *does* upgrade AUR packages — but always through
 > yay's diff/edit review menus, so you see and approve every PKGBUILD change
-> before it builds. Use `-P` (pacman-only) for a fully non-interactive,
+> before it builds. Use `--aur-updater none` for a fully non-interactive,
 > repos-only update.
 
 ---
@@ -160,29 +160,39 @@ packages just drop `.py` files into the versioned dir — no broken `.so`, so
 `checkrebuild` misses them; `-y` catches those by directory ownership.
 
 Both honor `-R`/`--auto-rebuild` to actually rebuild — **through the configured
-backend** (see [Modifiers](#modifiers)): with the default **yay** backend a
-rebuild is `yay -S --rebuild` with the diff/edit review menus, so it goes through
-the same PKGBUILD review and the [install-time supply-chain hooks](#install-time-warnings-the-yay-hooks)
-as a normal install, and uses yay's resumable build cache. `-m` uses `pamac
-build`; `-P` (pacman) **refuses** — pacman can't build AUR packages, so re-run
-with `-Y`/`-m` to rebuild.
+`AUR_UPDATER`** (see [Modifiers](#modifiers)): with the default `yay` a rebuild is
+`yay -S --rebuild` with the diff/edit review menus, so it goes through the same
+PKGBUILD review and the [install-time supply-chain hooks](#install-time-warnings-the-yay-hooks)
+as a normal install, and uses yay's resumable build cache. `AUR_UPDATER=pamac`
+uses `pamac build`; `AUR_UPDATER=none` **refuses** (no AUR helper) — set
+`--aur-updater yay` (or `pamac`) to rebuild.
 
 ---
 
 ## Modifiers
 
-These change *how* an action behaves; they do nothing on their own. The first
-three select the `-u` update backend — **the default is `yay`** if none is given.
+These change *how* an action behaves; they do nothing on their own.
 
-| Flag | Long form | Effect |
-|------|-----------|--------|
-| `-Y` | `--yay` | **(default)** `pacman` for repos **+ `yay` for AUR**, with PKGBUILD review |
-| `-P` | `--pacman` | plain `pacman -Syuu` — official repos only, no AUR |
-| `-m` | `--pamac` | `pamac` for repos + AUR (the previous default) |
-| `-R` | `--auto-rebuild` | `-r` / `-y` actually rebuild (y/n confirm) instead of just listing — via the selected backend (yay `--rebuild` with review by default; pacman refuses) |
+`-u` runs **two independent steps**, each with its own tool, so it's always clear
+which tool does what. Set them in the [config](#configuration) (`SYSTEM_UPDATER` /
+`AUR_UPDATER`) or override per-run:
 
-> The backend flags are mutually exclusive; if you pass more than one, the **last
-> one on the command line wins**. With no backend flag, `-u` uses **yay**.
+| Flag | Value(s) | Effect |
+|------|----------|--------|
+| `--system-updater` | `pacman` *(default)* · `pamac` | Tool for the **official repos** |
+| `--aur-updater` | `yay` *(default)* · `pamac` · `none` | Tool for the **AUR**. `yay` = with PKGBUILD review + supply-chain hooks; `pamac` = pamac (also manages repos — see below); `none` = skip AUR |
+| `-R` | `--auto-rebuild` | `-r` / `-y` actually rebuild (y/n confirm) instead of just listing — via the `AUR_UPDATER` (yay `--rebuild` with review by default; `none` refuses) |
+
+| `SYSTEM_UPDATER` | `AUR_UPDATER` | Result |
+|---|---|---|
+| `pacman` | `yay` | **default** — `pacman -Syuu`, then `yay -Sua` (review + hooks) |
+| `pacman` | `none` | repos only (`pacman -Syuu`), AUR skipped |
+| `pamac` | `yay` | `pamac update` for repos, then `yay -Sua` for AUR |
+| *(any)* | `pamac` | `pamac update -a` does **both** — pamac is all-in-one, so it manages repos too regardless of `SYSTEM_UPDATER` |
+
+> The old `-Y` / `-P` / `-m` flags and the single `UPDATER=` config key are **gone**
+> (replaced by the two settings above). A legacy `UPDATER=` in your config is still
+> honored for now, mapped with a deprecation warning.
 
 ### Configuration flags
 
@@ -214,15 +224,15 @@ off when piped, when `NO_COLOR` is set, or with `--no-color`.
 ## The yay updater (default) and why it beats pamac for AUR
 
 ```bash
-sudo ~/update.sh -u        # yay is the default backend — no flag needed
-sudo ~/update.sh -u -Y     # identical; -Y is explicit but redundant now
+sudo ~/update.sh -u                       # defaults: repos via pacman, AUR via yay
+sudo ~/update.sh -u --aur-updater none    # repos only, skip AUR
 ```
 
-This refreshes mirrors, updates official repos with `pacman -Syuu`, then updates
-AUR packages with **yay** running as your real user. It is the **default** `-u`
-backend, so a plain `sudo ~/update.sh` (or `-u`) already uses it. yay is invoked with the
-diff/edit menus enabled so **you review every PKGBUILD and every diff before
-anything builds**.
+By default `-u` refreshes mirrors, updates official repos with `pacman -Syuu`, then
+updates AUR packages with **yay** (`yay -Sua`) running as your real user. yay is
+invoked with the diff/edit menus enabled so **you review every PKGBUILD and every
+diff before anything builds** — and it triggers the
+[install-time supply-chain hooks](#install-time-warnings-the-yay-hooks).
 
 **Benefits over pamac's `-a` AUR handling:**
 
@@ -561,7 +571,7 @@ On the first run it is **auto-created** from [`update.conf.example`](update.conf
 skip it with `--no-config`, and inspect the merged result with `--print-config`.
 
 **Precedence** (lowest → highest): built-in defaults → config file → CLI flags.
-A CLI flag always wins over the config (e.g. `-P` overrides `UPDATER="yay"`).
+A CLI flag always wins over the config (e.g. `--aur-updater none` overrides `AUR_UPDATER="yay"`).
 
 **Safety gate:** because the file is sourced **as root**, the script refuses to
 read it if it is world-writable or not owned by you or root, falling back to
@@ -572,7 +582,8 @@ built-in defaults with a warning.
 | Setting | Type | Default | Meaning |
 |---------|------|---------|---------|
 | `DEFAULT_ACTIONS` | list | `clean orphans update rebuilds python-rebuild pacnew firmware` | Checks to run when no action flag is given |
-| `UPDATER` | `yay`/`pacman`/`pamac` | `yay` | Default `-u` backend (overridden by `-Y`/`-P`/`-m`) |
+| `SYSTEM_UPDATER` | `pacman`/`pamac` | `pacman` | Tool for official repos (`--system-updater`) |
+| `AUR_UPDATER` | `yay`/`pamac`/`none` | `yay` | Tool for the AUR (`--aur-updater`); `yay` enables review + hooks, `none` skips AUR |
 | `AUTO_REBUILD` | bool | `false` | Default for `-R` (rebuild on `-r`/`-y`) |
 | `AUR_RECENT_DAYS` | int | `21` | Days within which a PKGBUILD counts as `RECENTLY-CHANGED` |
 | `AUR_IOC_CAMPAIGNS` | list | `aur-infected chaos-rat russian-spam` | Threat-intel campaigns `-A`/`-S` load |
