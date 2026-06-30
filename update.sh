@@ -61,6 +61,15 @@ AUR_RECENT_DAYS=21
 # so we can find update.conf.example for first-run seeding.
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
+# Directory of THIS file (works whether executed, symlinked, or sourced by tests)
+# so the shared library resolves correctly in every context.
+UPDATE_SH_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# Shared AUR helpers (matches_any, aur_query_rpc, aur_fetch_bad_*). Also used by
+# aur-precheck.sh / the yay hooks so the supply-chain logic has one home.
+# shellcheck source=lib/aur-common.sh
+source "$UPDATE_SH_DIR/lib/aur-common.sh"
+
 # Live config file (sourced as root; see load_config for the safety gate).
 CONFIG_FILE="$USER_HOME/.config/update.sh/config"
 
@@ -87,17 +96,7 @@ ACTIONS_SPECIFIED=false
 # Helper Functions
 # =============================================================================
 
-# Return 0 if $1 matches any of the remaining args as an exact name or glob.
-matches_any() {
-    local name="$1"; shift
-    local pat
-    for pat in "$@"; do
-        [[ -z "$pat" ]] && continue
-        # shellcheck disable=SC2053  -- intentional glob match (RHS unquoted)
-        [[ "$name" == $pat ]] && return 0
-    done
-    return 1
-}
+# (matches_any lives in lib/aur-common.sh, sourced above.)
 
 # Source the config file as root, with a safety gate (we are running as root, so
 # a writable-by-others config would be a privilege-escalation hole). Auto-seeds
@@ -562,18 +561,7 @@ manage_kernels() {
 # =============================================================================
 # AUR Audit & Supply-Chain Scan
 # =============================================================================
-
-# Query the AUR RPC v5 'info' endpoint for a list of packages. Uses POST so a
-# large package set does not blow the URL-length limit. Echoes the JSON body
-# (an object with a .results array), or '{}' on failure so callers can degrade.
-aur_query_rpc() {
-    local data=() p
-    for p in "$@"; do
-        data+=(--data-urlencode "arg[]=$p")
-    done
-    curl -fsS --max-time 30 "${data[@]}" \
-        "https://aur.archlinux.org/rpc/v5/info" 2>/dev/null || echo '{}'
-}
+# (aur_query_rpc + aur_fetch_bad_* live in lib/aur-common.sh, sourced above.)
 
 aur_audit() {
     print_section "AUR audit: metrics + maintainer-change detection..."
@@ -688,37 +676,6 @@ aur_audit() {
 
     echo ""
     echo "Full report saved to $report"
-}
-
-# Fetch the merged list of known-malicious AUR maintainer accounts (newline-
-# separated). Empty on network failure (callers treat that as "no data").
-aur_fetch_bad_accounts() {
-    local c url
-    for c in "${AUR_IOC_CAMPAIGNS[@]}"; do
-        url="$AUR_IOC_RAW_BASE/campaigns/$c/accounts.json"
-        curl -fsS --max-time 20 "$url" 2>/dev/null \
-            | jq -r '.accounts // {} | keys[]' 2>/dev/null || true
-    done | sort -u
-}
-
-# Fetch the merged list of known-malicious package names from all campaigns.
-aur_fetch_bad_packages() {
-    local c f url
-    for c in "${AUR_IOC_CAMPAIGNS[@]}"; do
-        for f in packages.txt packages-extra.txt; do
-            url="$AUR_IOC_RAW_BASE/campaigns/$c/$f"
-            curl -fsS --max-time 20 "$url" 2>/dev/null || true
-        done
-    done | grep -vE '^\s*(#|$)' | sort -u
-}
-
-# Fetch the merged list of malicious npm/bun package names from all campaigns.
-aur_fetch_bad_npm() {
-    local c url
-    for c in "${AUR_IOC_CAMPAIGNS[@]}"; do
-        url="$AUR_IOC_RAW_BASE/campaigns/$c/npm-packages.txt"
-        curl -fsS --max-time 20 "$url" 2>/dev/null || true
-    done | grep -vE '^\s*(#|$)' | sort -u
 }
 
 aur_scan() {
