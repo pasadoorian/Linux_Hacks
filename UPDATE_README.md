@@ -82,8 +82,8 @@ matches the old `--all` behavior — see [Configuration](#configuration)).
 | `-c` | `--clean` | Clean pacman/pamac/yay/paru caches and stale db locks |
 | `-o` | `--orphans` | Inventory **foreign** (AUR/manual) packages to `~/alien-pkgs.txt` for review, then prompt to remove **orphaned** deps. Two different concepts — see [Foreign vs. orphaned](#foreign-vs-orphaned-packages) |
 | `-u` | `--update` | Full system update (**yay by default**: pacman repos + yay AUR; see modifiers) |
-| `-r` | `--rebuilds` | Find packages broken by a **library/ABI change** (`checkrebuild`); rebuild with `-R`. See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
-| `-y` | `--python-rebuild` | Find packages stranded by a **Python interpreter version bump**; rebuild with `-R`. See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
+| `-r` | `--rebuilds` | Find packages broken by a **library/ABI change** (`checkrebuild`); rebuild with `-R` (via the configured backend — yay by default). See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
+| `-y` | `--python-rebuild` | Find packages stranded by a **Python interpreter version bump**; rebuild with `-R` (via the configured backend). See [Rebuild vs. Python rebuild](#rebuild-r-vs-python-rebuild-y) |
 | `-p` | `--pacnew` | Show `.pacnew` files needing a merge (`pacdiff -o`) |
 | `-f` | `--firmware` | Refresh & list firmware updates (`fwupdmgr`) |
 | `-k` | `--kernel` | Interactive kernel install/remove (`mhwd-kernel`) |
@@ -157,8 +157,15 @@ Both find packages that need rebuilding, but for **different kinds of breakage**
 Why both? They **overlap but neither subsumes the other.** Compiled Python
 extensions (linking `libpython3.X.so`) appear in *both*. But **pure-Python**
 packages just drop `.py` files into the versioned dir — no broken `.so`, so
-`checkrebuild` misses them; `-y` catches those by directory ownership. Both
-honor `-R`/`--auto-rebuild` to actually rebuild (via `pamac build`).
+`checkrebuild` misses them; `-y` catches those by directory ownership.
+
+Both honor `-R`/`--auto-rebuild` to actually rebuild — **through the configured
+backend** (see [Modifiers](#modifiers)): with the default **yay** backend a
+rebuild is `yay -S --rebuild` with the diff/edit review menus, so it goes through
+the same PKGBUILD review and the [install-time supply-chain hooks](#install-time-warnings-the-yay-hooks)
+as a normal install, and uses yay's resumable build cache. `-m` uses `pamac
+build`; `-P` (pacman) **refuses** — pacman can't build AUR packages, so re-run
+with `-Y`/`-m` to rebuild.
 
 ---
 
@@ -172,7 +179,7 @@ three select the `-u` update backend — **the default is `yay`** if none is giv
 | `-Y` | `--yay` | **(default)** `pacman` for repos **+ `yay` for AUR**, with PKGBUILD review |
 | `-P` | `--pacman` | plain `pacman -Syuu` — official repos only, no AUR |
 | `-m` | `--pamac` | `pamac` for repos + AUR (the previous default) |
-| `-R` | `--auto-rebuild` | `-r` / `-y` actually rebuild (with a y/n confirm) instead of just listing |
+| `-R` | `--auto-rebuild` | `-r` / `-y` actually rebuild (y/n confirm) instead of just listing — via the selected backend (yay `--rebuild` with review by default; pacman refuses) |
 
 > The backend flags are mutually exclusive; if you pass more than one, the **last
 > one on the command line wins**. With no backend flag, `-u` uses **yay**.

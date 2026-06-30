@@ -47,12 +47,35 @@ teardown() { teardown_update_env; }
     refute_line --partial "pamac build"
 }
 
-@test "check_rebuilds with -R builds after confirmation" {
+@test "check_rebuilds with -R rebuilds via the configured backend (yay default)" {
     export FX_REBUILD_FILE="$TEST_HOME/rebuild.txt"
     printf '%s\n' "/usr/lib/foo libfoo" > "$FX_REBUILD_FILE"
     AUTO_REBUILD=true
     run check_rebuilds <<< $'y\n'
+    assert stub_called "yay -S --rebuild"
+    assert stub_called "libfoo"
+    refute_line --partial "pamac build"
+}
+
+@test "rebuild_packages uses 'yay -S --rebuild' with review under the yay backend" {
+    UPDATER=yay
+    run rebuild_packages libfoo libbar
+    assert stub_called "yay -S --rebuild"
+    assert stub_called "--diffmenu=true"
+    assert stub_called "libfoo"
+}
+
+@test "rebuild_packages uses 'pamac build' under the pamac backend" {
+    UPDATER=pamac
+    run rebuild_packages libfoo
     assert stub_called "pamac build libfoo"
+}
+
+@test "rebuild_packages refuses under the pacman backend (no AUR support)" {
+    UPDATER=pacman
+    run rebuild_packages libfoo
+    assert_failure
+    assert_output --partial "Cannot rebuild AUR packages with the pacman backend"
 }
 
 @test "check_rebuilds reports nothing to do on empty output" {

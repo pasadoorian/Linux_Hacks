@@ -407,6 +407,29 @@ perform_update() {
     esac
 }
 
+# Rebuild the given packages through the CONFIGURED backend, so rebuilds get the
+# same PKGBUILD review + ~/.config/yay/init.lua supply-chain hooks (and yay's
+# resumable build cache) as a normal update -- not a hardcoded 'pamac build'.
+# yay --rebuild forces a build even when the version is unchanged (the soname /
+# checkrebuild case). pacman can't build AUR, so that backend refuses.
+rebuild_packages() {
+    case "$UPDATER" in
+        yay)
+            sudo -u "$SUDO_USER" yay -S --rebuild \
+                --answerdiff None --answeredit None --diffmenu=true --editmenu=true \
+                -- "$@"
+            ;;
+        pamac)
+            sudo -u "$SUDO_USER" pamac build "$@"
+            ;;
+        pacman)
+            err "Cannot rebuild AUR packages with the pacman backend (no AUR support)."
+            note "Re-run with the yay (-Y) or pamac (-m) backend to rebuild: $*"
+            return 1
+            ;;
+    esac
+}
+
 # Library/ABI rebuild check: checkrebuild (rebuild-detector) finds packages that
 # link a shared library (.so) which changed or vanished -- the general soname-bump
 # case. Complemented by check_python_rebuilds for the Python-interpreter case.
@@ -439,8 +462,11 @@ check_rebuilds() {
 
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             note "Rebuilding packages..."
-            sudo -u "$SUDO_USER" pamac build $packages
-            summary_add "rebuilt packages with outdated deps"
+            if rebuild_packages $packages; then
+                summary_add "rebuilt packages with outdated deps"
+            else
+                warn "Rebuild did not complete (see output above)."
+            fi
         else
             note "Skipping rebuild."
         fi
@@ -506,8 +532,11 @@ check_python_rebuilds() {
 
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             note "Rebuilding packages..."
-            sudo -u "$SUDO_USER" pamac build $unique_packages
-            summary_add "rebuilt packages for Python $current_version"
+            if rebuild_packages $unique_packages; then
+                summary_add "rebuilt packages for Python $current_version"
+            else
+                warn "Rebuild did not complete (see output above)."
+            fi
         else
             note "Skipping rebuild."
         fi
